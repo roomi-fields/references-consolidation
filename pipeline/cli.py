@@ -235,13 +235,16 @@ def cmd_reactivate_ocr(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Lance les checks d'invariants I1-I15 et affiche le rapport.
+    """Lance les checks d'invariants I1-I19 et affiche le rapport.
 
     Options :
-      --fix         : applique les fix_fn auto_fixable (I4 R8, I6 sha recompute,
-                      I9 renumber, I5 semi semi → needs_reacquisition)
-      --severity X  : filtre min "info" / "warn" / "error" (défaut: info)
-      --json        : sortie JSON machine-readable
+      --fix             : applique les fix_fn auto_fixable (I4 R8, I6 sha
+                          recompute, I9 renumber, I5 semi semi → needs_reacquisition)
+      --severity X      : filtre min "info" / "warn" / "error" (défaut: info)
+      --json            : sortie JSON machine-readable
+      --correlate-rtfm  : active Couche 5 — I16/I17/I19 (corrélation RTFM,
+                          appels CLI rtfm)
+      --check-sha       : active I18 (recompute sha256 sur les PDFs, lent)
     """
     severity = getattr(args, "severity", None) or "info"
     rc, out = run_doctor_for_cli(
@@ -249,6 +252,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         apply_fix=getattr(args, "fix", False),
         min_severity=severity,
         as_json=getattr(args, "json", False),
+        correlate_rtfm=getattr(args, "correlate_rtfm", False),
+        check_sha=getattr(args, "check_sha", False),
     )
     print(out)
     if rc != 0:
@@ -326,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     pra.set_defaults(func=cmd_reactivate_ocr)
 
     pdo = sub.add_parser("doctor",
-                         help="Lance les invariants I1-I15 (sur-couche worker)")
+                         help="Lance les invariants I1-I19 (sur-couche worker)")
     pdo.add_argument("--fix", action="store_true",
                      help="Applique les fix_fn auto-fixable (I4, I6, I9, I5 semi)")
     pdo.add_argument("--severity", choices=("info", "warn", "error"),
@@ -334,6 +339,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Filtre min de sévérité (défaut: info = tout afficher)")
     pdo.add_argument("--json", action="store_true",
                      help="Sortie JSON machine-readable")
+    pdo.add_argument("--correlate-rtfm", action="store_true",
+                     dest="correlate_rtfm",
+                     help="Active Couche 5 — I16/I17/I19 (corrélation RTFM, "
+                          "appel `rtfm failed` CLI)")
+    pdo.add_argument("--check-sha", action="store_true",
+                     dest="check_sha",
+                     help="Active I18 — recompute sha256 sur tous les PDFs "
+                          "concernés (lent, opt-in)")
     pdo.set_defaults(func=cmd_doctor)
 
     pev = sub.add_parser("events",

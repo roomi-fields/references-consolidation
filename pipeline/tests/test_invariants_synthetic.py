@@ -54,6 +54,15 @@ FIXTURE_EXPECTED_INVARIANT = {
     "I15_rtfm_overdue.md": "I15",
 }
 
+# Couche 5 — fixtures avec mocks. Testées en phase 4 (séparée car nécessite
+# des monkey-patches sur rtfm_failures + is_pdf_image_only).
+FIXTURE_EXPECTED_INVARIANT_LAYER5 = {
+    "I16_rtfm_ingest_failure.md": "I16",
+    "I17_pdf_format_invalid.md": "I17",
+    "I18_sha_drift.md": "I18",
+    "I19_image_only_no_text_sources.md": "I19",
+}
+
 
 def _patch_config_for_synthetic():
     """Monkey-patch pipeline.config + modules qui ont importé SOURCES en local.
@@ -250,19 +259,170 @@ def test_blocked_human_not_auto_fixed() -> bool:
     return True
 
 
+def test_layer5_with_mocks() -> bool:
+    """Phase 4 — I16-I19 avec mocks de rtfm_failures.list_failures et
+    is_pdf_image_only.
+
+    On exclut les autres fixtures de la liste de refs car elles déclencheraient
+    leurs propres invariants (I5, I6, etc.) qui parasiteraient le compte.
+    On ne charge QUE les 4 fixtures Couche 5.
+    """
+    print("\n=== Phase 4 : invariants Couche 5 (I16-I19) avec mocks ===")
+    _patch_config_for_synthetic()
+
+    # Charge UNIQUEMENT les fixtures Couche 5
+    layer5_refs = []
+    for fname in FIXTURE_EXPECTED_INVARIANT_LAYER5:
+        ref = _load_fixture(fname)
+        layer5_refs.append(ref)
+    print(f"  Loaded {len(layer5_refs)} Couche 5 refs")
+
+    # Préparer les mocks
+    from pipeline import rtfm_failures
+    pdf_abs_str = str((SOURCES_FOR_TESTS / "Sources/fake_doc_for_tests.pdf").resolve())
+
+    mock_failures = [
+        # I16 : bucket "pdftext-other" (générique, WARN) — par défaut on cible
+        # un bucket non-format pour ne pas déclencher I17 aussi
+        rtfm_failures.RtfmFailure(
+            type="ingest",
+            filepath=pdf_abs_str,
+            bucket="pdftext-other",
+            error="pdftext extraction failed: stream error at offset 1024",
+            corpus="default",
+            job_id=4242,
+            finished_at="2026-04-01T12:00:00Z",
+        ),
+    ]
+    # I17 : bucket pdf-format-invalid (ERROR) — même filepath, le matcher
+    # par basename retournera la 1ère failure trouvée. On la mettra en 2e
+    # mais on filtrera par bucket dans le test selon la fixture.
+    # Pour distinguer, on génère des failures distinctes par invariant en
+    # patchant list_failures dynamiquement selon la ref testée. Simplification :
+    # on prépare LA bonne failure par fixture testée.
+
+    failures_for_i16 = [rtfm_failures.RtfmFailure(
+        type="ingest", filepath=pdf_abs_str, bucket="pdftext-other",
+        error="pdftext extraction failed", corpus="default",
+    )]
+    failures_for_i17 = [rtfm_failures.RtfmFailure(
+        type="ingest", filepath=pdf_abs_str, bucket="pdf-format-invalid",
+        error="PDFium: Data format error: failed to load page 1",
+        corpus="default",
+    )]
+
+    ok_count = 0
+    failures_log = []
+
+    # I16 — mock list_failures retournant un bucket non-format
+    ref_i16 = _load_fixture("I16_rtfm_ingest_failure.md")
+    violations_i16 = doctor.run_all_checks(
+        [ref_i16], vault_root=VAULT_DIR,
+        correlate_rtfm=True,
+        rtfm_failures_override=failures_for_i16,
+    )
+    has_i16 = any(v.invariant == "I16" and v.ref_slug == ref_i16.slug
+                  for v in violations_i16)
+    other_errors_i16 = [v for v in violations_i16
+                        if v.invariant not in ("I16", "I17")  # I17 peut co-déclencher selon probe_pdf_health
+                        and v.severity == "ERROR"
+                        and v.ref_slug == ref_i16.slug]
+    if has_i16 and not other_errors_i16:
+        ok_count += 1
+        print(f"  [OK] I16_rtfm_ingest_failure.md : I16 détecté (bucket=pdftext-other, WARN)")
+    else:
+        failures_log.append(
+            f"I16 attendu mais "
+            f"trouvés: {sorted({(v.invariant, v.severity) for v in violations_i16})}"
+        )
+        print(f"  [FAIL] I16_rtfm_ingest_failure.md : {failures_log[-1]}")
+
+    # I17 — mock list_failures retournant bucket pdf-format-invalid (ERROR)
+    ref_i17 = _load_fixture("I17_pdf_format_invalid.md")
+    violations_i17 = doctor.run_all_checks(
+        [ref_i17], vault_root=VAULT_DIR,
+        correlate_rtfm=True,
+        rtfm_failures_override=failures_for_i17,
+    )
+    has_i17 = any(v.invariant == "I17" and v.ref_slug == ref_i17.slug
+                  and v.severity == "ERROR"
+                  for v in violations_i17)
+    if has_i17:
+        ok_count += 1
+        print(f"  [OK] I17_pdf_format_invalid.md : I17 détecté (ERROR, RTFM+probe cross-check)")
+    else:
+        failures_log.append(
+            f"I17 attendu mais "
+            f"trouvés: {sorted({(v.invariant, v.severity) for v in violations_i17})}"
+        )
+        print(f"  [FAIL] I17_pdf_format_invalid.md : {failures_log[-1]}")
+
+    # I18 — check_sha=True, pas besoin de mock rtfm
+    ref_i18 = _load_fixture("I18_sha_drift.md")
+    violations_i18 = doctor.run_all_checks(
+        [ref_i18], vault_root=VAULT_DIR,
+        check_sha=True,
+        rtfm_failures_override=None,
+    )
+    has_i18 = any(v.invariant == "I18" and v.ref_slug == ref_i18.slug
+                  and v.severity == "ERROR"
+                  for v in violations_i18)
+    if has_i18:
+        ok_count += 1
+        print(f"  [OK] I18_sha_drift.md : I18 détecté (ERROR, sha YAML != sha disque)")
+    else:
+        failures_log.append(
+            f"I18 attendu mais "
+            f"trouvés: {sorted({(v.invariant, v.severity) for v in violations_i18})}"
+        )
+        print(f"  [FAIL] I18_sha_drift.md : {failures_log[-1]}")
+
+    # I19 — mock is_pdf_image_only → True
+    ref_i19 = _load_fixture("I19_image_only_no_text_sources.md")
+
+    original_is_image = rtfm_failures.is_pdf_image_only
+    rtfm_failures.is_pdf_image_only = lambda *a, **kw: True
+    # Re-importer car invariants importe la fonction localement
+    try:
+        violations_i19 = doctor.run_all_checks(
+            [ref_i19], vault_root=VAULT_DIR,
+            correlate_rtfm=True,
+            rtfm_failures_override=[],  # pas de failure pour ce PDF
+        )
+    finally:
+        rtfm_failures.is_pdf_image_only = original_is_image
+
+    has_i19 = any(v.invariant == "I19" and v.ref_slug == ref_i19.slug
+                  and v.severity == "INFO"
+                  for v in violations_i19)
+    if has_i19:
+        ok_count += 1
+        print(f"  [OK] I19_image_only_no_text_sources.md : I19 détecté (INFO, suggestion)")
+    else:
+        failures_log.append(
+            f"I19 attendu mais "
+            f"trouvés: {sorted({(v.invariant, v.severity) for v in violations_i19})}"
+        )
+        print(f"  [FAIL] I19_image_only_no_text_sources.md : {failures_log[-1]}")
+
+    print(f"\nRésultat phase 4 : {ok_count}/4")
+    return ok_count == 4
+
+
 def main() -> int:
     print("=" * 60)
-    print("Tests synthétiques invariants I1-I15")
+    print("Tests synthétiques invariants I1-I19")
     print("=" * 60)
 
     ok1 = test_fixtures_basic()
     ok2 = test_autofix()
     ok3 = test_blocked_human_not_auto_fixed()
+    ok4 = test_layer5_with_mocks()
 
     print()
     print("=" * 60)
-    if ok1 and ok2 and ok3:
-        print("=== test_invariants_synthetic : 15/15 fixtures OK ===")
+    if ok1 and ok2 and ok3 and ok4:
+        print("=== test_invariants_synthetic : 19/19 fixtures OK ===")
         return 0
     print("=== test_invariants_synthetic : FAIL ===")
     return 1

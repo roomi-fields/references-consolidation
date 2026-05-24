@@ -587,6 +587,257 @@ def check_I15(ref: Ref, now: datetime | None = None) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# I16 — RTFM ingest failure miroirisée (WARN/ERROR selon bucket, non auto-fix)
+# Couche 5 — Corrélation RTFM. Requiert `correlate_rtfm=True` côté doctor.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# États dans lesquels on s'attend à ce que RTFM ait indexé le PDF (l'OCR
+# peut être en cours pour `awaiting_rtfm_ocr`, donc on ne lève I16 que si
+# RTFM a un VRAI échec, pas un simple "pas encore traité").
+_STATES_EXPECTING_RTFM_VISIBLE = {
+    "pdf_acquired",
+    "awaiting_rtfm_ocr",
+    "page1_validated",
+    "sota_cited_confirmed",
+}
+
+
+def check_I16(ref: Ref, ctx: dict | None = None) -> list[dict]:
+    """RTFM ingest/ocr failure miroirisée.
+
+    `ctx` doit contenir :
+      - "rtfm_failures": list[RtfmFailure] (pré-chargées, partagées registry-wide)
+      - éventuellement "rtfm_check_for_slug": dict {slug: rtfm_check_result}
+
+    Si bucket == file-vanished ET PDF présent sur disque (I5 ne lève pas)
+    → ERROR (drift cache RTFM, à reconcile).
+    Sinon → WARN (humain regarde, pas une erreur de pipeline).
+    """
+    if ctx is None or "rtfm_failures" not in ctx:
+        return []  # check inactif sans pré-chargement
+    if ref.state not in _STATES_EXPECTING_RTFM_VISIBLE:
+        return []
+    pdf_abs = ref.pdf_path_abs
+    if pdf_abs is None:
+        return []
+
+    failures = ctx.get("rtfm_failures") or []
+    from .rtfm_failures import find_failure_for_path
+    failure = find_failure_for_path(failures, pdf_abs)
+    if failure is None:
+        return []
+
+    # Cas spécial file-vanished : si le PDF est physiquement présent, c'est
+    # un drift du cache RTFM (incohérence à reconcile)
+    if failure.bucket == "file-vanished" and pdf_abs.exists():
+        return [_viol(
+            "I16", ref.slug, "ERROR",
+            f"RTFM signale file-vanished sur {failure.filepath!r} "
+            f"mais le PDF est présent sur disque — drift cache RTFM "
+            f"(reconcile requis). error: {failure.error[:120]}",
+            auto_fixable=False,
+        )]
+
+    # Cas général : on remonte la raison RTFM en WARN
+    return [_viol(
+        "I16", ref.slug, "WARN",
+        f"RTFM {failure.type} échec bucket={failure.bucket!r} "
+        f"sur {failure.filepath} : {failure.error[:160]}",
+        auto_fixable=False,
+    )]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I17 — Format PDF défectueux (probe + RTFM cross-check) (ERROR, non auto-fix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Buckets RTFM qui indiquent un problème de format PDF (vs OCR en attente)
+_PDF_FORMAT_FAILURE_BUCKETS = {
+    "pdf-format-invalid",
+    "pdftext-other",
+    "memory-exceeded",
+}
+
+
+def check_I17(ref: Ref, ctx: dict | None = None) -> list[dict]:
+    """Format PDF défectueux — RTFM bucket invalide + cross-check probe optionnel.
+
+    Signaux croisés (anti-perf) :
+      - SI RTFM signale un bucket de type "format" pour ce PDF → lever I17
+        (et optionnellement renforcer via `probe_pdf_health` si dispo).
+      - SI RTFM ne signale rien → on N'invoque PAS `probe_pdf_health` sur
+        TOUS les PDFs (coût prohibitif sur 685 refs).
+
+    Le cas "probe négatif sans RTFM" est documenté comme code écrit non
+    testé E2E — il nécessiterait un balayage probe_pdf_health complet,
+    déraisonnable pour le mode par défaut.
+
+    Requiert `ctx["rtfm_failures"]` pour le cross-check.
+    """
+    if ctx is None:
+        return []
+    if ref.state not in STATES_WITH_PDF:
+        return []
+    pdf_abs = ref.pdf_path_abs
+    if pdf_abs is None or not pdf_abs.exists():
+        # I5 lève déjà sur l'absence
+        return []
+
+    # Signal RTFM : présence d'un échec avec bucket "format"
+    failures = ctx.get("rtfm_failures") or []
+    from .rtfm_failures import find_failure_for_path
+    failure = find_failure_for_path(failures, pdf_abs)
+    if failure is None or failure.bucket not in _PDF_FORMAT_FAILURE_BUCKETS:
+        return []
+
+    # Cross-check probe (optionnel — ne s'invoque que pour les refs avec
+    # une failure RTFM bucket-format, donc coût marginal)
+    probe_negative = None
+    probe_category = None
+    try:
+        import validate_pdf_content as v
+        probe_category, _detail = v.probe_pdf_health(pdf_abs)
+        probe_negative = probe_category in (
+            "corrupt_unreadable", "wrong_format", "too_small", "missing",
+        )
+    except (ImportError, ModuleNotFoundError, Exception):
+        probe_negative = None
+
+    if probe_negative:
+        return [_viol(
+            "I17", ref.slug, "ERROR",
+            f"PDF format défectueux — RTFM bucket={failure.bucket!r} "
+            f"ET probe={probe_category!r} (confiance haute, "
+            f"signal croisé). error: {failure.error[:120]}",
+            auto_fixable=False,
+        )]
+
+    # RTFM seul (probe non-négatif ou indisponible)
+    probe_note = (f"probe={probe_category!r}" if probe_category
+                  else "probe indisponible")
+    return [_viol(
+        "I17", ref.slug, "ERROR",
+        f"PDF format défectueux — RTFM bucket={failure.bucket!r} "
+        f"mais {probe_note} (signal partiel — vérifier manuellement). "
+        f"error: {failure.error[:120]}",
+        auto_fixable=False,
+    )]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I18 — Drift sha256 YAML vs disque (ERROR, non auto-fix)
+# Anti-heuristique : on ne sait pas si c'est le YAML ou le fichier qui est faux.
+# Coûteux (sha256 sur fichier disque) → derrière flag opt-in `--check-sha`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_I18(ref: Ref, ctx: dict | None = None) -> list[dict]:
+    """Drift sha256 — frontmatter.pdf_sha256 ≠ sha256(fichier disque).
+
+    Extension stricte de I6 (qui vérifie juste la PRÉSENCE et le format hex).
+    Ici on RECALCULE le sha du fichier et compare au YAML. Si divergence :
+    ERROR — le PDF a été remplacé en silence (corruption, écrasement manuel,
+    ou YAML jamais mis à jour après une cascade qui a écrasé le fichier).
+
+    Anti-heuristique : pas d'auto-fix. L'humain tranche (le YAML ? le fichier ?).
+    """
+    if ref.state not in STATES_WITH_PDF:
+        return []
+    sha_yaml = ref.frontmatter.get("pdf_sha256")
+    if not isinstance(sha_yaml, str) or not _SHA256_RE.match(sha_yaml):
+        # I6 lève déjà — on évite le doublon
+        return []
+    pdf_abs = ref.pdf_path_abs
+    if pdf_abs is None or not pdf_abs.exists():
+        # I5 lève déjà
+        return []
+    sha_disk = _compute_sha256(pdf_abs)
+    if sha_disk is None:
+        # Fichier illisible — anomalie, mais pas notre invariant
+        return []
+    if sha_disk == sha_yaml:
+        return []
+    return [_viol(
+        "I18", ref.slug, "ERROR",
+        f"drift sha256 — YAML={sha_yaml[:12]}… vs disque={sha_disk[:12]}… "
+        f"sur {ref.frontmatter.get('pdf_path')!r}. "
+        f"Anti-heuristique : pas d'auto-fix, l'humain tranche YAML vs fichier.",
+        auto_fixable=False,
+    )]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I19 — PDF image-only sans sources texte testées (INFO, non auto-fix)
+# Suggestion : relancer cascade avec sources texte avant d'attendre l'OCR.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Sources cascade qui livrent (potentiellement) du texte natif vs scans.
+# Liste alignée sur pipeline/cascade.py CASCADE (lignes 633-644).
+_TEXT_PDF_SOURCES = {
+    "crossref_oa",
+    "arxiv",
+    "openalex_oa",
+    "unpaywall",
+    "hal",
+    "core",
+}
+
+
+def check_I19(ref: Ref, ctx: dict | None = None) -> list[dict]:
+    """PDF image-only sans source texte testée — suggérer relance cascade.
+
+    Déclenchement :
+      - state ∈ {pdf_acquired, awaiting_rtfm_ocr}
+      - pdftotext extrait < 100 chars (= image-only)
+      - acquisition_attempts[] ne contient AUCUNE source texte tentée avec
+        verdict != no_source/skipped (= toutes les sources texte ont été
+        traitées rapidement comme "pas applicable" sans vraiment essayer,
+        OU aucune n'a été tentée).
+
+    INFO car c'est une suggestion d'action, pas une violation stricte.
+    """
+    if ref.state not in ("pdf_acquired", "awaiting_rtfm_ocr"):
+        return []
+    pdf_abs = ref.pdf_path_abs
+    if pdf_abs is None or not pdf_abs.exists():
+        return []
+
+    # Court-circuit perf : vérifie d'abord acquisition_attempts (rapide, mémoire)
+    # avant d'invoquer pdftotext (subprocess potentiellement lent).
+    attempts = ref.frontmatter.get("acquisition_attempts") or []
+    text_sources_really_tried = set()
+    for a in attempts:
+        if not isinstance(a, dict):
+            continue
+        src = a.get("source")
+        verdict = a.get("verdict")
+        if src in _TEXT_PDF_SOURCES and verdict not in (
+            None, "", "no_source", "skipped", "skipped_already_tried",
+            "skipped_breaker_open",
+        ):
+            text_sources_really_tried.add(src)
+
+    if text_sources_really_tried:
+        return []  # au moins une source texte a vraiment été tentée
+
+    # Détection image-only (peut être skipped si pdftotext absent)
+    from .rtfm_failures import is_pdf_image_only
+    image_only = is_pdf_image_only(pdf_abs)
+    if image_only is not True:
+        # Pas image-only OU détection impossible → on ne lève pas
+        return []
+
+    missing = sorted(_TEXT_PDF_SOURCES - text_sources_really_tried)
+    return [_viol(
+        "I19", ref.slug, "INFO",
+        f"PDF image-only (pdftotext < 100 chars) mais aucune source texte "
+        f"vraiment tentée (manquantes : {missing}). "
+        f"Suggérer `pipeline run --ref {ref.slug}` après basculement en "
+        f"needs_reacquisition pour re-tenter via sources texte avant OCR.",
+        auto_fixable=False,
+    )]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Registre des checks (pour doctor.run_all_checks)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -613,6 +864,15 @@ REGISTRY_LEVEL_CHECKS: list[tuple[str, Callable[[list[Ref]], list[dict]]]] = [
     ("I13", check_I13),
 ]
 
+# Couche 5 — Checks ref-level qui prennent un ctx (failures pré-chargées, etc.)
+# Activés via `correlate_rtfm=True` (I16, I17, I19) et `check_sha=True` (I18).
+REF_LEVEL_CHECKS_WITH_CTX: list[tuple[str, Callable[[Ref, dict | None], list[dict]]]] = [
+    ("I16", check_I16),
+    ("I17", check_I17),
+    ("I18", check_I18),
+    ("I19", check_I19),
+]
+
 
 # Index des sévérités pour affichage rapide
 SEVERITY_BY_INVARIANT = {
@@ -620,4 +880,9 @@ SEVERITY_BY_INVARIANT = {
     "I7": "ERROR", "I8": "ERROR", "I10": "ERROR", "I14": "ERROR",
     "I4": "WARN", "I9": "WARN", "I11": "WARN", "I12": "WARN", "I13": "WARN",
     "I15": "INFO",
+    # Couche 5
+    "I16": "WARN",   # peut devenir ERROR pour file-vanished (cf. check_I16)
+    "I17": "ERROR",
+    "I18": "ERROR",
+    "I19": "INFO",
 }

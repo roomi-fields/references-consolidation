@@ -23,7 +23,8 @@ from pathlib import Path
 COVERAGE_RUN = Path(__file__).parent / "coverage_run_2026-05-24.md"
 
 EXPECTED_FIXES = ["F1", "F2", "F3", "F4"]
-EXPECTED_INVARIANTS = [f"I{n}" for n in range(1, 16)]
+# I1-I15 = Couche 1, I16-I19 = Couche 5 (RTFM correlation)
+EXPECTED_INVARIANTS = [f"I{n}" for n in range(1, 20)]
 MIN_REFS_PER_FIX = 2
 MIN_FIXTURES_PER_INVARIANT = 1  # 1 fixture par invariant (cf. plan §6.4)
 
@@ -105,7 +106,7 @@ def main() -> int:
         if m:
             blob = m.group(1).strip()[:120]
             print(f"  {fix} : {blob}")
-    print(f"  --- Couche 1 (I1-I15) : {len(EXPECTED_INVARIANTS)} invariants couverts ---")
+    print(f"  --- Couches 1+5 (I1-I19) : {len(EXPECTED_INVARIANTS)} invariants couverts ---")
     return 0
 
 

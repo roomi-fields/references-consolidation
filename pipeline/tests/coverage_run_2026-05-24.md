@@ -319,3 +319,58 @@ I15 — code écrit non testé E2E : ocr_pending_since absent (skip codé), seui
 - I15 : la fenêtre 30j/7j est dure. Pas de test paramétrable des seuils (le now() est captured à l'appel).
 - Auto-fix I5/I7 : "semi" — bascule en `needs_reacquisition` + flag. Le test vérifie que `auto_fix` retourne fixed > 0 mais ne re-check pas le state post-fix (puisque la fixture serait alors needs_reacquisition, plus en violation I5/I7). À valider sur registre réel avant usage production de `--fix` sur ces invariants.
 
+---
+
+## Couche 5 — Corrélation RTFM I16-I19 (2026-05-24)
+
+**Statut** : ✅ 4/4 fixtures synthétiques OK avec mocks.
+
+**Implémentation** :
+- `pipeline/rtfm_failures.py` (~200 LOC) : wrapper `list_failures()`,
+  `check_ref()`, `is_pdf_image_only()`, dataclass `RtfmFailure`.
+- `pipeline/invariants.py` : `check_I16/17/18/19` + `REF_LEVEL_CHECKS_WITH_CTX`.
+- `pipeline/doctor.py` : `run_all_checks(correlate_rtfm, check_sha, rtfm_failures_override)`.
+- `pipeline/cli.py` : flags `--correlate-rtfm` et `--check-sha` sur `pipeline doctor`.
+
+**Schéma observé `rtfm failed -f json`** (cf. rtfm/cli.py::cmd_failed) :
+```json
+{"total": int, "failures": [{"id", "type", "filepath", "corpus",
+  "bucket", "error", "finished_at"}]}
+```
+
+**Buckets RTFM connus** (`_failure_bucket` in rtfm/cli.py:189) :
+`pdf-format-invalid`, `file-vanished`, `duplicate-content`,
+`memory-exceeded`, `pdftext-other`, `ocr-tesseract-error`, `other`, `unknown`.
+
+**Tests** : `pipeline/tests/synthetic/refs/I1{6,7,8,9}_*.md` (4 fixtures) +
+mocks de `rtfm_failures.list_failures` (via `rtfm_failures_override`) et
+`is_pdf_image_only` (monkey-patch).
+
+### Détail par invariant
+
+```
+I16 — testé synthétique sur : [I16_rtfm_ingest_failure (bucket=pdftext-other, WARN détecté, mock list_failures)]
+I16 — code écrit non testé E2E : branche file-vanished+PDF-présent (ERROR drift cache) — codée, fixture absente ; appel rtfm CLI réel sur registre (rtfm DB courante est vide d'échecs au 2026-05-24)
+I17 — testé synthétique sur : [I17_pdf_format_invalid (bucket=pdf-format-invalid, ERROR détecté, mock list_failures)]
+I17 — code écrit non testé E2E : signal probe_pdf_health seul (sans RTFM) — code écrit, fixture absente (nécessite un PDF corrompu réel) ; signal croisé probe+RTFM (confiance haute) idem
+I18 — testé synthétique sur : [I18_sha_drift (sha YAML=deadbeef… vs sha réel, ERROR détecté, check_sha=True)]
+I18 — code écrit non testé E2E : branche pdf inexistant (skip), sha=None (skip lecture) — branches codées, fixtures absentes ; recompute sur registre réel à valider (909 PDFs, ~minutes)
+I19 — testé synthétique sur : [I19_image_only_no_text_sources (mock is_pdf_image_only→True, INFO détecté, sources crossref/arxiv en no_source/skipped_breaker)]
+I19 — code écrit non testé E2E : pdftext absent (détection None, skip) — codé, non testé ; image-only avec au moins 1 source texte vraiment tentée (return [] codé, fixture absente) ; case state ≠ {pdf_acquired,awaiting_rtfm_ocr} (skip codé)
+```
+
+### Décisions de design
+
+- **Pré-chargement** : `list_failures()` appelé 1 seule fois par `run_all_checks(correlate_rtfm=True)`, partagé dans `ctx["rtfm_failures"]` (évite 909 appels CLI).
+- **Mocking en tests** : `rtfm_failures_override` paramètre injectable dans `run_all_checks` (anti-monkey-patch à chaud, plus propre).
+- **Anti-heuristique I18** : sha drift n'est jamais auto-fixé (on ne sait pas si YAML ou fichier est correct). Le flag `--check-sha` est SÉPARÉ de `--correlate-rtfm` car le coût (sha256 sur 909 fichiers) est différent du coût (1 appel `rtfm failed`).
+- **Matching path** : `find_failure_for_path` tolérant — basename + chemin absolu (gère worktrees + symlinks).
+- **`probe_pdf_health` absent** : si `validate_pdf_content` n'est pas importable (ex: hors worker), I17 fonctionne quand même en signal partiel RTFM-only.
+
+### Limites connues
+
+- RTFM DB locale au 2026-05-24 : 0 échecs (`rtfm failed -f json` → `{"total": 0, "failures": []}`). Le code Couche 5 n'a donc PAS été validé E2E sur registre réel avec failures réelles — uniquement via mocks. À valider dès qu'une session d'ingest produit des échecs.
+- `is_pdf_image_only` dépend de `pdftotext` (poppler-utils). Sans, on retourne None et I19 ne lève jamais (skip safe).
+- I19 sources texte : la liste `_TEXT_PDF_SOURCES` est gelée sur `cascade.CASCADE`. Si une nouvelle source est ajoutée à la cascade, il faut mettre à jour `_TEXT_PDF_SOURCES`.
+- I18 reste opt-in (`--check-sha`) — sur registre réel de 909 PDFs sur HDD lent, c'est l'ordre de la minute. Pas adapté à un appel par défaut.
+

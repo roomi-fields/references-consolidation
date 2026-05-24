@@ -21,6 +21,7 @@ from typing import Callable, Iterable
 from .registry import Ref, load_ref, iter_refs
 from .invariants import (
     REF_LEVEL_CHECKS,
+    REF_LEVEL_CHECKS_WITH_CTX,
     REGISTRY_LEVEL_CHECKS,
     SEVERITY_BY_INVARIANT,
 )
@@ -65,18 +66,41 @@ def _dict_to_violation(d: dict) -> Violation:
 # Core API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_all_checks(refs: Iterable[Ref], vault_root: Path | None = None) -> list[Violation]:
+def run_all_checks(
+    refs: Iterable[Ref],
+    vault_root: Path | None = None,
+    correlate_rtfm: bool = False,
+    check_sha: bool = False,
+    rtfm_failures_override: list | None = None,
+) -> list[Violation]:
     """Lance tous les checks (ref-level + registry-level) sur les refs.
 
     Retourne une liste de Violation (vide si tout est OK).
 
-    `vault_root` optionnel : utilisé par I11 / I12 pour résoudre Publications/
-    et Articles/. Si None, utilise la valeur de config.VAULT.
+    Args:
+      vault_root: utilisé par I11 / I12 pour résoudre Publications/ et Articles/.
+        Si None, utilise la valeur de config.VAULT.
+      correlate_rtfm: active I16, I17, I19 (Couche 5 — appels rtfm CLI).
+        Pré-charge la liste des failures RTFM une seule fois pour tout le run.
+      check_sha: active I18 (recompute sha256 sur tous les PDFs concernés).
+        Coûteux — quelques minutes sur 909 PDFs. Opt-in.
+      rtfm_failures_override: liste pré-construite de `RtfmFailure` à utiliser
+        au lieu d'appeler `rtfm failed` (pour les tests / mocks).
     """
     refs_list = list(refs)
     violations: list[Violation] = []
 
-    # 1. Ref-level checks
+    # Pré-charger les failures RTFM si Couche 5 demandée (1 appel CLI au lieu de N)
+    ctx: dict | None = None
+    if correlate_rtfm or rtfm_failures_override is not None:
+        if rtfm_failures_override is not None:
+            failures = rtfm_failures_override
+        else:
+            from .rtfm_failures import list_failures
+            failures = list_failures()
+        ctx = {"rtfm_failures": failures}
+
+    # 1. Ref-level checks (sans ctx)
     for ref in refs_list:
         for inv_name, check_fn in REF_LEVEL_CHECKS:
             try:
@@ -90,6 +114,31 @@ def run_all_checks(refs: Iterable[Ref], vault_root: Path | None = None) -> list[
                 dicts = check_fn(ref)
             for d in dicts:
                 violations.append(_dict_to_violation(d))
+
+    # 1b. Ref-level checks Couche 5 (avec ctx). Sélection selon flags.
+    if correlate_rtfm or check_sha or rtfm_failures_override is not None:
+        # Filtrage des invariants à exécuter selon les flags
+        active_invariants = set()
+        if correlate_rtfm or rtfm_failures_override is not None:
+            active_invariants.update({"I16", "I17", "I19"})
+        if check_sha:
+            active_invariants.add("I18")
+        for ref in refs_list:
+            for inv_name, check_fn in REF_LEVEL_CHECKS_WITH_CTX:
+                if inv_name not in active_invariants:
+                    continue
+                try:
+                    dicts = check_fn(ref, ctx)
+                except Exception as e:
+                    # Un check Couche 5 qui crash ne doit pas casser le rapport
+                    # (pas dans la philo doctor de remonter des bugs internes
+                    # en violations — mais on log discrètement)
+                    import sys
+                    print(f"[doctor] WARN: {inv_name} crash sur {ref.slug}: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
+                    continue
+                for d in dicts:
+                    violations.append(_dict_to_violation(d))
 
     # 2. Registry-level checks
     for inv_name, check_fn in REGISTRY_LEVEL_CHECKS:
@@ -227,8 +276,14 @@ def run_doctor_for_cli(
     apply_fix: bool = False,
     min_severity: str = "info",
     as_json: bool = False,
+    correlate_rtfm: bool = False,
+    check_sha: bool = False,
 ) -> tuple[int, str]:
     """Point d'entrée commun pour CLI et intégration end-of-run.
+
+    Args:
+      correlate_rtfm: active I16, I17, I19 (appels rtfm CLI, ~1-2s).
+      check_sha: active I18 (recompute sha256 sur tous les PDFs, lent).
 
     Retourne (returncode, output_text).
       - returncode = 1 si ERROR restant, 0 sinon
@@ -237,7 +292,11 @@ def run_doctor_for_cli(
     if refs is None:
         refs = list(iter_refs())
 
-    violations = run_all_checks(refs)
+    violations = run_all_checks(
+        refs,
+        correlate_rtfm=correlate_rtfm,
+        check_sha=check_sha,
+    )
 
     if apply_fix:
         fixed, skipped = auto_fix(violations)
@@ -245,7 +304,11 @@ def run_doctor_for_cli(
         if refs is not None:
             # Re-charger les refs (les fix ont touché disque)
             refs_reloaded = list(iter_refs())
-            violations = run_all_checks(refs_reloaded)
+            violations = run_all_checks(
+                refs_reloaded,
+                correlate_rtfm=correlate_rtfm,
+                check_sha=check_sha,
+            )
         prefix_note = f"\n[auto-fix] {fixed} violation(s) réparée(s), {skipped} skipped\n"
     else:
         prefix_note = ""
