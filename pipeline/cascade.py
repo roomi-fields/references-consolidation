@@ -25,6 +25,7 @@ import yaml  # noqa: F401
 
 from .config import SOURCES, QUARANTINE, PLUGIN_LIB  # noqa: F401
 from .registry import Ref
+from .breakers import BreakerRegistry
 
 # Imports différés des helpers — ils ont des side effects (logs, sessions).
 # On les importe lazy depuis le plugin lib via sys.path déjà inséré par config.
@@ -653,19 +654,58 @@ def already_tried(ref: Ref, source: str) -> bool:
     return False
 
 
-def run_cascade(ref: Ref) -> tuple[str, list[dict]]:
+# Registry global de breakers — singleton process-wide, partagé par les
+# appels successifs à run_cascade dans la même session worker.
+_BREAKERS: BreakerRegistry | None = None
+
+
+def get_breakers() -> BreakerRegistry:
+    """Accès au registre global de breakers (init paresseuse)."""
+    global _BREAKERS
+    if _BREAKERS is None:
+        _BREAKERS = BreakerRegistry(fail_threshold=5, window_s=60.0)
+    return _BREAKERS
+
+
+def reset_breakers() -> None:
+    """Réinitialise le registre global. Utile pour les tests."""
+    global _BREAKERS
+    _BREAKERS = None
+
+
+def run_cascade(ref: Ref, breakers: BreakerRegistry | None = None
+                ) -> tuple[str, list[dict]]:
     """Lance la cascade. Retourne ('success'|'cascade_exhausted', attempts_log).
 
     Les attempts sont retournés pour que le caller les append au YAML.
+
+    Si `breakers` n'est pas fourni, utilise le registre global de la session.
+    Une source dont le breaker est ouvert est skippée avec verdict
+    `skipped_breaker_open` (et reason explicite).
     """
+    if breakers is None:
+        breakers = get_breakers()
+
     attempts: list[dict] = []
     for source, fn in CASCADE:
         if already_tried(ref, source):
             attempts.append({"source": source, "verdict": "skipped_already_tried"})
             continue
+        if breakers[source].is_open():
+            attempts.append({
+                "source": source,
+                "verdict": "skipped_breaker_open",
+                "reason": "5_consecutive_fails_in_60s",
+            })
+            continue
         verdict, info = fn(ref)
         entry = {"source": source, "verdict": verdict, **info}
         attempts.append(entry)
+        # On considère la source OK si elle a su livrer (success) OU livrer
+        # un PDF qui a échoué la validation page 1 (page1_failed = source a
+        # délivré, la ref est juste un mauvais hit — pas la faute de la source).
+        # failed / no_source comptent comme un échec côté breaker.
+        breakers[source].record(success=verdict in ("success", "page1_failed"))
         if verdict == "success":
             return "success", attempts
         # En cas de page1_failed, on quarantine et on continue (homonymie probable).
