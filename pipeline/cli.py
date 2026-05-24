@@ -10,6 +10,7 @@ from .dispatcher import plan_for, IllegalTransition
 from .transitions import REGISTRY as TRANSITIONS, NotImplementedYet
 from .journal import append_event, append_blocked
 from .linter_wrapper import run_lint
+from .doctor import run_doctor_for_cli
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -131,14 +132,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Récap session : planned={n_planned}  done={n_done}  pending={n_pending}  "
           f"blocked={n_blocked}  skipped_terminal={n_skip}")
 
+    rc_lint = 0
+    rc_doctor = 0
+
     if not args.no_lint and not args.dry_run:
         print()
         print("# Lint final")
-        rc, _out = run_lint(verbose=True)
-        if rc != 0:
-            print(f"[lint] returncode={rc} — invariants violés", file=sys.stderr)
-            return rc
-    return 0
+        rc_lint, _out = run_lint(verbose=True)
+        if rc_lint != 0:
+            print(f"[lint] returncode={rc_lint} — invariants R1-R10 violés",
+                  file=sys.stderr)
+
+    # Doctor en fin de session (Couche 1) : invariants I1-I15. Jamais --fix auto.
+    # Miroir de --no-lint : --no-doctor pour skip.
+    if not getattr(args, "no_doctor", False) and not args.dry_run:
+        print()
+        print("# Doctor final (invariants I1-I15)")
+        rc_doctor, out_doctor = run_doctor_for_cli(
+            refs=None, apply_fix=False, min_severity="info", as_json=False,
+        )
+        print(out_doctor)
+        if rc_doctor != 0:
+            print(f"[doctor] returncode={rc_doctor} — invariants I1-I15 violés",
+                  file=sys.stderr)
+
+    return max(rc_lint, rc_doctor)
 
 
 def cmd_reactivate_ocr(args: argparse.Namespace) -> int:
@@ -213,6 +231,29 @@ def cmd_reactivate_ocr(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Lance les checks d'invariants I1-I15 et affiche le rapport.
+
+    Options :
+      --fix         : applique les fix_fn auto_fixable (I4 R8, I6 sha recompute,
+                      I9 renumber, I5 semi semi → needs_reacquisition)
+      --severity X  : filtre min "info" / "warn" / "error" (défaut: info)
+      --json        : sortie JSON machine-readable
+    """
+    severity = getattr(args, "severity", None) or "info"
+    rc, out = run_doctor_for_cli(
+        refs=None,
+        apply_fix=getattr(args, "fix", False),
+        min_severity=severity,
+        as_json=getattr(args, "json", False),
+    )
+    print(out)
+    if rc != 0:
+        print(f"\n[doctor] returncode={rc} — au moins 1 ERROR détecté",
+              file=sys.stderr)
+    return rc
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m pipeline",
@@ -237,6 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Affiche les plans sans muter")
     prn.add_argument("--no-lint", action="store_true",
                      help="Skip le lint final")
+    prn.add_argument("--no-doctor", action="store_true",
+                     help="Skip les invariants doctor I1-I15 en fin de run")
     prn.add_argument("-v", "--verbose", action="store_true")
     prn.set_defaults(func=cmd_run)
 
@@ -244,6 +287,17 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Re-évalue les awaiting_rtfm_ocr via rtfm check")
     pra.add_argument("--quiet", action="store_true")
     pra.set_defaults(func=cmd_reactivate_ocr)
+
+    pdo = sub.add_parser("doctor",
+                         help="Lance les invariants I1-I15 (sur-couche worker)")
+    pdo.add_argument("--fix", action="store_true",
+                     help="Applique les fix_fn auto-fixable (I4, I6, I9, I5 semi)")
+    pdo.add_argument("--severity", choices=("info", "warn", "error"),
+                     default="info",
+                     help="Filtre min de sévérité (défaut: info = tout afficher)")
+    pdo.add_argument("--json", action="store_true",
+                     help="Sortie JSON machine-readable")
+    pdo.set_defaults(func=cmd_doctor)
 
     return p
 
