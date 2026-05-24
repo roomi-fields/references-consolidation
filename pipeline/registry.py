@@ -12,6 +12,20 @@ import yaml
 from .config import REFS, SOURCES
 
 
+class RegistryWriteCorrupted(RuntimeError):
+    """Levée si le re-parse post-write d'un fichier ref échoue ou diverge.
+
+    Indique une anomalie sévère (bug du dumper, FS truncation inattendue).
+    Le worker doit s'arrêter et l'humain doit investiguer — pas de tentative
+    de réparation automatique (`os.replace` est censé être atomique).
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
+
+
 @dataclass
 class Ref:
     """Une référence du registry."""
@@ -78,9 +92,18 @@ def iter_refs(refs_dir: Path = REFS):
 
 
 def save_ref(ref: Ref) -> None:
-    """Écrit la ref atomiquement (tempfile + os.replace).
+    """Écrit la ref atomiquement (tempfile + os.replace), puis re-parse.
 
     Le body est préservé tel quel. Le frontmatter est re-dumpé en YAML.
+
+    Post-write validation :
+      1. Re-lit le fichier après `os.replace`.
+      2. Re-parse le frontmatter. Si parse impossible → RegistryWriteCorrupted.
+      3. Vérifie que `state` lu == `state` qu'on a écrit → sinon corruption.
+
+    Pas de backup ni de tentative de réparation : `os.replace` est atomique
+    sur ext4/NTFS/drvfs. Si le re-parse échoue, c'est un bug du dumper PyYAML
+    (donc déterministe — pas un crash transient).
     """
     fm_yaml = yaml.safe_dump(
         ref.frontmatter,
@@ -102,6 +125,27 @@ def save_ref(ref: Ref) -> None:
         except OSError:
             pass
         raise
+
+    # Post-write validation : re-lire et re-parser ce qu'on vient d'écrire.
+    try:
+        reread = ref.path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise RegistryWriteCorrupted(
+            ref.path, f"post_write_read_failed:{type(e).__name__}"
+        ) from e
+    fm_back, _body_back = parse_frontmatter_md(reread)
+    if fm_back is None:
+        raise RegistryWriteCorrupted(
+            ref.path, "post_write_yaml_unparseable"
+        )
+    expected_state = ref.frontmatter.get("state")
+    actual_state = fm_back.get("state")
+    if actual_state != expected_state:
+        raise RegistryWriteCorrupted(
+            ref.path,
+            f"state_field_mismatch_post_write "
+            f"(expected={expected_state!r}, got={actual_state!r})",
+        )
 
 
 def append_state_history(ref: Ref, new_state: str, by: str, meta: dict | None = None) -> None:
