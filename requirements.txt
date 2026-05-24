@@ -1,0 +1,7 @@
+requests>=2.31
+cloudscraper>=1.2.71
+beautifulsoup4>=4.12
+pyyaml>=6.0
+lxml>=4.9
+# Optional: pour Anna's Archive /slow_download (Turnstile)
+# playwright>=1.40
