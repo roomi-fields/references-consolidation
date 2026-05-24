@@ -260,3 +260,62 @@ F4 — code écrit non testé E2E : (aucun)
 P5 — testé E2E sur : [chomsky_1957 (still_pending), lerdahl_2001 (missing R8), aaron_2013 (ok unit)]
 P5 — code écrit non testé E2E : ocr_failed, anomaly_zero_chunks, needs_reacq_post_ocr (branches sans cas dans les 13 actuels)
 ```
+
+---
+
+## Couche 1 — Invariants I1-I15 (2026-05-24)
+
+**Statut** : ✅ 15/15 fixtures synthétiques OK.
+
+**Implémentation** : `pipeline/invariants.py` (15 fonctions `check_I<n>`) +
+`pipeline/doctor.py` (orchestrateur + auto_fix + rapport markdown/JSON) +
+sous-commande CLI `pipeline doctor [--fix] [--severity] [--json]` +
+intégration en fin de `pipeline run` (miroir `--no-doctor` du `--no-lint`).
+
+**Tests** : `pipeline/tests/synthetic/refs/I<n>_*.md` (15 fixtures) + 1 SOTA
+synthétique pour I12 + 1 PDF synthétique pour I5/I6/I7/I13/I15.
+`pipeline/tests/test_invariants_synthetic.py` lance les 3 phases : détection,
+auto-fix, anti-heuristique I10.
+
+### Détail par invariant
+
+```
+I1  — testé synthétique sur : [I01_state_unknown (ERROR détecté)]
+I1  — code écrit non testé E2E : exit code 0 sur registre réel à valider
+I2  — testé synthétique sur : [I02a+I02b paire avec slug forcé en mémoire (ERROR détecté)]
+I2  — code écrit non testé E2E : doublon natif sur disque impossible (fs nature), simulation mémoire est l'unique mode
+I3  — testé synthétique sur : [I03_uid_bad_prefix (préfixe foobarprefix:, ERROR détecté)]
+I3  — code écrit non testé E2E : uid non-string (type incorrect)
+I4  — testé synthétique sur : [I04_pdf_path_prefixed (préfixe 10_SOURCES/, WARN détecté, auto-fix R8 OK)]
+I4  — code écrit non testé E2E : pdf_path absolu (chemin commençant par '/') — détection codée, fixture absente
+I5  — testé synthétique sur : [I05_pdf_missing (pdf_path inexistant, ERROR détecté, auto-fix semi OK)]
+I5  — code écrit non testé E2E : pdf_path absent dans state pdf_acquired (branch return early codée, fixture absente)
+I6  — testé synthétique sur : [I06_sha256_invalid (sha non hex, ERROR détecté, auto-fix recompute OK)]
+I6  — code écrit non testé E2E : pdf_sha256 absent (branch codée), fix avec PDF inexistant (no-op codé)
+I7  — testé synthétique sur : [I07_page1_log_inconsistent (verdict='failed_author_mismatch', ERROR détecté, auto-fix semi OK)]
+I7  — code écrit non testé E2E : log absent, at non ISO (branches codées, fixtures absentes)
+I8  — testé synthétique sur : [I08_history_non_monotonic (at descending, ERROR détecté)]
+I8  — code écrit non testé E2E : last_state ≠ frontmatter.state (branch codée, fixture absente)
+I9  — testé synthétique sur : [I09_attempts_renumber (n=1,3,4, WARN détecté, auto-fix renumber OK)]
+I9  — code écrit non testé E2E : (aucun)
+I10 — testé synthétique sur : [I10_blocked_no_reason (blocked_reason vide ET blocked_since absent, 2 ERROR détectés, auto_fixable=False vérifié)]
+I10 — code écrit non testé E2E : (aucun) — l'invariant ne s'auto-fix JAMAIS par design
+I11 — testé synthétique sur : [I11_cited_in_orphan (SOTA inexistant, WARN détecté)]
+I11 — code écrit non testé E2E : cited_in malformé (non-list, non-dict) — branches codées, fixtures absentes
+I12 — testé synthétique sur : [i12_reciprocity_missing + SOTA_Fixture_I12_Cites_It.md (WARN détecté)]
+I12 — code écrit non testé E2E : wikilink vers ref absente du registre (skip codé, fixture absente)
+I13 — testé synthétique sur : [I13a+I13b (même sha256 sur PDF synthétique, WARN détecté pour chaque slug impliqué)]
+I13 — code écrit non testé E2E : (aucun)
+I14 — testé synthétique sur : [I14_terminal_transition (retracted → uid_resolved dans history, ERROR détecté)]
+I14 — code écrit non testé E2E : terminal sans suivant (no-op codé), pairs avec entries None (skip codé)
+I15 — testé synthétique sur : [I15_rtfm_overdue (ocr depuis 480j, last_check 350j, INFO détecté)]
+I15 — code écrit non testé E2E : ocr_pending_since absent (skip codé), seuils 30j/7j non testés en frontière
+```
+
+### Limites connues (transparence)
+
+- I2 (slug doublon) : impossible à reproduire sur disque (fs ne le permet pas). Le test simule via patch en mémoire — adéquat pour valider la logique de détection, mais pas le scénario "vraie collision après rename foireux".
+- I11/I12 : dépendent du layout `Publications/` + `Articles/`. Les fixtures pointent vers un vault synthétique sous `pipeline/tests/synthetic/vault/`. La résolution dans le vrai vault n'est testée que par lecture de code.
+- I15 : la fenêtre 30j/7j est dure. Pas de test paramétrable des seuils (le now() est captured à l'appel).
+- Auto-fix I5/I7 : "semi" — bascule en `needs_reacquisition` + flag. Le test vérifie que `auto_fix` retourne fixed > 0 mais ne re-check pas le state post-fix (puisque la fixture serait alors needs_reacquisition, plus en violation I5/I7). À valider sur registre réel avant usage production de `--fix` sur ces invariants.
+

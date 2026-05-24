@@ -29,17 +29,23 @@ Depuis la racine du repo, avec le venv activé :
 
 ```bash
 python -m pipeline status              # comptes par état
-python -m pipeline run [--ref X]       # pousse les refs actives vers l'avant
+python -m pipeline run [--ref X]       # pousse les refs actives, lint + doctor en fin
 python -m pipeline run --dry-run       # affiche les plans sans muter
+python -m pipeline run --no-doctor     # skip les invariants I1-I15 en fin de run
 python -m pipeline lint                # invariants R1-R10 (linter du registry)
+python -m pipeline doctor              # invariants I1-I15 (sur-couche worker)
+python -m pipeline doctor --fix        # auto-fix les violations auto-fixables (I4, I6, I9, I5 semi)
+python -m pipeline doctor --severity warn  # filtre min (info/warn/error)
+python -m pipeline doctor --json       # sortie machine-readable
 python -m pipeline reactivate-ocr      # re-évalue les awaiting_rtfm_ocr via rtfm check
 ```
 
 Tests E2E :
 
 ```bash
-python pipeline/tests/test_f1_negative.py     # test anti-homonymie F1
-python pipeline/tests/assert_coverage.py      # garde-fou couverture
+python pipeline/tests/test_f1_negative.py            # test anti-homonymie F1
+python pipeline/tests/test_invariants_synthetic.py   # 15/15 fixtures invariants I1-I15
+python pipeline/tests/assert_coverage.py             # garde-fou couverture (F1-F4, P5, I1-I15)
 ```
 
 ## Dépendances externes (hors repo)
@@ -82,9 +88,11 @@ Modules :
 - `pipeline/cascade.py` — cascade 10 niveaux d'acquisition
 - `pipeline/rtfm_helper.py` — wrapper `rtfm check --path`
 - `pipeline/linter_wrapper.py` — wrapper du linter du registry
+- `pipeline/invariants.py` — 15 fonctions `check_I<n>` (Couche 1)
+- `pipeline/doctor.py` — orchestrateur invariants + auto-fix + rapport (Couche 1)
 - `pipeline/cli.py` — argparse `python -m pipeline ...`
 - `pipeline/tests/` — coverage_set, coverage_run, assert_coverage,
-  test_f1_negative
+  test_f1_negative, test_invariants_synthetic, fixtures synthétiques
 
 ## Discipline « livré »
 
