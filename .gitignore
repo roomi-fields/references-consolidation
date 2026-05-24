@@ -13,3 +13,8 @@ __pycache__/
 
 # Local test outputs
 pipeline/tests/coverage_run_*.local.md
+
+# Local tooling caches and per-clone Claude Code instructions
+.rtfm/
+.claude/
+CLAUDE.md
