@@ -23,7 +23,9 @@ from pathlib import Path
 COVERAGE_RUN = Path(__file__).parent / "coverage_run_2026-05-24.md"
 
 EXPECTED_FIXES = ["F1", "F2", "F3", "F4"]
+EXPECTED_INVARIANTS = [f"I{n}" for n in range(1, 16)]
 MIN_REFS_PER_FIX = 2
+MIN_FIXTURES_PER_INVARIANT = 1  # 1 fixture par invariant (cf. plan §6.4)
 
 
 def main() -> int:
@@ -63,6 +65,31 @@ def main() -> int:
         if not re.search(pattern, text, re.IGNORECASE):
             failures.append(f"{fix} — ligne 'code écrit non testé E2E' absente")
 
+    # Section I1-I15 (Couche 1) : chaque invariant doit avoir un tableau
+    # "testé synthétique sur" + "code écrit non testé E2E" pour la conscience G2.
+    for inv in EXPECTED_INVARIANTS:
+        # Pattern souple : "I3 — testé synthétique sur : [...]"
+        pattern = rf"{inv}\b\s*[—-]\s*testé synthétique sur\s*:\s*\[(.*?)\]"
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if not m:
+            failures.append(
+                f"{inv} — tableau G2 'testé synthétique sur' absent (Couche 1)"
+            )
+            continue
+        slugs_blob = m.group(1).strip()
+        n_refs = slugs_blob.count("(")
+        if n_refs < MIN_FIXTURES_PER_INVARIANT:
+            failures.append(
+                f"{inv} — seulement {n_refs} fixture(s) testée(s), "
+                f"requis ≥ {MIN_FIXTURES_PER_INVARIANT} : `{slugs_blob[:120]}`"
+            )
+
+    # Vérifier la ligne "code écrit non testé E2E" pour chaque invariant (conscience G2)
+    for inv in EXPECTED_INVARIANTS:
+        pattern = rf"{inv}\b\s*[—-]\s*code écrit non testé E2E\s*:"
+        if not re.search(pattern, text, re.IGNORECASE):
+            failures.append(f"{inv} — ligne 'code écrit non testé E2E' absente")
+
     if failures:
         print("=== assert_coverage : FAIL ===", file=sys.stderr)
         for f in failures:
@@ -78,6 +105,7 @@ def main() -> int:
         if m:
             blob = m.group(1).strip()[:120]
             print(f"  {fix} : {blob}")
+    print(f"  --- Couche 1 (I1-I15) : {len(EXPECTED_INVARIANTS)} invariants couverts ---")
     return 0
 
 
