@@ -337,6 +337,42 @@ def test_layer5_with_mocks() -> bool:
         )
         print(f"  [FAIL] I16_rtfm_ingest_failure.md : {failures_log[-1]}")
 
+    # I16 (bis) — branche 2 : drapeau persistant exposé par `rtfm check` ─────
+    # rtfm_failures vide (branche 1 muette), rtfm_checks_override fournit
+    # un `ingest_failure_reason` non null. La ref doit lever I16 WARN.
+    mock_check = {
+        "query": ref_i16.slug,
+        "matches": 1,
+        "books": [{
+            "slug": "fake_rtfm_slug",
+            "filename": "fake.pdf",
+            "ingest_failure_reason": "pdftext_extraction_error",
+            "ingest_failure_error": "PDFium: Data format error",
+            "ocr_failure_reason": None,
+            "ocr_failure_error": None,
+        }],
+    }
+    violations_i16_check = doctor.run_all_checks(
+        [ref_i16], vault_root=VAULT_DIR,
+        correlate_rtfm=False,
+        rtfm_failures_override=[],
+        rtfm_checks_override={ref_i16.slug: mock_check},
+    )
+    has_i16_check = any(
+        v.invariant == "I16" and v.ref_slug == ref_i16.slug
+        and "drapeau persistant" in v.message
+        for v in violations_i16_check
+    )
+    if has_i16_check:
+        ok_count += 1
+        print(f"  [OK] I16 (bis) : drapeau persistant ingest_failure_reason détecté")
+    else:
+        failures_log.append(
+            f"I16 branche check attendue mais "
+            f"trouvés: {sorted({(v.invariant, v.severity) for v in violations_i16_check})}"
+        )
+        print(f"  [FAIL] I16 (bis) : {failures_log[-1]}")
+
     # I17 — mock list_failures retournant bucket pdf-format-invalid (ERROR)
     ref_i17 = _load_fixture("I17_pdf_format_invalid.md")
     violations_i17 = doctor.run_all_checks(
@@ -405,8 +441,8 @@ def test_layer5_with_mocks() -> bool:
         )
         print(f"  [FAIL] I19_image_only_no_text_sources.md : {failures_log[-1]}")
 
-    print(f"\nRésultat phase 4 : {ok_count}/4")
-    return ok_count == 4
+    print(f"\nRésultat phase 4 : {ok_count}/5")
+    return ok_count == 5
 
 
 def main() -> int:

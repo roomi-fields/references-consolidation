@@ -72,6 +72,7 @@ def run_all_checks(
     correlate_rtfm: bool = False,
     check_sha: bool = False,
     rtfm_failures_override: list | None = None,
+    rtfm_checks_override: dict | None = None,
 ) -> list[Violation]:
     """Lance tous les checks (ref-level + registry-level) sur les refs.
 
@@ -81,24 +82,53 @@ def run_all_checks(
       vault_root: utilisé par I11 / I12 pour résoudre Publications/ et Articles/.
         Si None, utilise la valeur de config.VAULT.
       correlate_rtfm: active I16, I17, I19 (Couche 5 — appels rtfm CLI).
-        Pré-charge la liste des failures RTFM une seule fois pour tout le run.
+        Pré-charge la liste des failures RTFM une seule fois pour tout le run,
+        ET interroge `rtfm check` ref-par-ref sur les états indexable-attendu
+        (awaiting_rtfm_ocr, pdf_acquired, needs_reacquisition) pour capter
+        les drapeaux persistants ingest/ocr_failure_reason.
       check_sha: active I18 (recompute sha256 sur tous les PDFs concernés).
         Coûteux — quelques minutes sur 909 PDFs. Opt-in.
       rtfm_failures_override: liste pré-construite de `RtfmFailure` à utiliser
         au lieu d'appeler `rtfm failed` (pour les tests / mocks).
+      rtfm_checks_override: dict {slug: rtfm_check_result} pour mocker la
+        passe `rtfm check` ref-par-ref (tests).
     """
     refs_list = list(refs)
     violations: list[Violation] = []
 
+    # États où l'on attend que RTFM ait au moins essayé d'indexer le PDF.
+    # On y interroge `rtfm check` pour capter les drapeaux persistants.
+    _STATES_RTFM_CHECK = {"awaiting_rtfm_ocr", "pdf_acquired",
+                          "needs_reacquisition"}
+
     # Pré-charger les failures RTFM si Couche 5 demandée (1 appel CLI au lieu de N)
     ctx: dict | None = None
-    if correlate_rtfm or rtfm_failures_override is not None:
+    if correlate_rtfm or rtfm_failures_override is not None \
+            or rtfm_checks_override is not None:
         if rtfm_failures_override is not None:
             failures = rtfm_failures_override
-        else:
+        elif correlate_rtfm:
             from .rtfm_failures import list_failures
             failures = list_failures()
+        else:
+            failures = []
         ctx = {"rtfm_failures": failures}
+
+        # Passe ciblée `rtfm check` ref-par-ref pour les états indexable-attendu.
+        # Coût : N appels CLI où N = refs en awaiting_rtfm_ocr + pdf_acquired
+        # + needs_reacquisition (typiquement < 20).
+        if rtfm_checks_override is not None:
+            ctx["rtfm_checks"] = rtfm_checks_override
+        elif correlate_rtfm:
+            from .rtfm_failures import check_ref
+            rtfm_checks: dict = {}
+            for ref in refs_list:
+                if ref.state not in _STATES_RTFM_CHECK:
+                    continue
+                result = check_ref(ref)
+                if result is not None:
+                    rtfm_checks[ref.slug] = result
+            ctx["rtfm_checks"] = rtfm_checks
 
     # 1. Ref-level checks (sans ctx)
     for ref in refs_list:

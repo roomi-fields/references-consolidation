@@ -603,17 +603,25 @@ _STATES_EXPECTING_RTFM_VISIBLE = {
 
 
 def check_I16(ref: Ref, ctx: dict | None = None) -> list[dict]:
-    """RTFM ingest/ocr failure miroirisée.
+    """RTFM ingest/ocr failure miroirisée — 2 sources cumulées.
 
-    `ctx` doit contenir :
-      - "rtfm_failures": list[RtfmFailure] (pré-chargées, partagées registry-wide)
-      - éventuellement "rtfm_check_for_slug": dict {slug: rtfm_check_result}
+    `ctx` peut contenir :
+      - "rtfm_failures": list[RtfmFailure] — vue job-queue (`rtfm failed`),
+        rapide et globale. Matching par filepath.
+      - "rtfm_checks": dict {slug: rtfm_check_result} — drapeaux persistants
+        sur le book (`rtfm check --path`), pré-chargés pour les états où on
+        attend une indexation (awaiting_rtfm_ocr, pdf_acquired, …).
 
     Si bucket == file-vanished ET PDF présent sur disque (I5 ne lève pas)
     → ERROR (drift cache RTFM, à reconcile).
     Sinon → WARN (humain regarde, pas une erreur de pipeline).
+
+    La 2ᵉ source (drapeaux persistants) n'émet que si la 1ʳᵉ n'a pas déjà
+    flagué la ref (évite doublons).
     """
-    if ctx is None or "rtfm_failures" not in ctx:
+    if ctx is None:
+        return []
+    if "rtfm_failures" not in ctx and "rtfm_checks" not in ctx:
         return []  # check inactif sans pré-chargement
     if ref.state not in _STATES_EXPECTING_RTFM_VISIBLE:
         return []
@@ -621,30 +629,57 @@ def check_I16(ref: Ref, ctx: dict | None = None) -> list[dict]:
     if pdf_abs is None:
         return []
 
+    violations: list[dict] = []
+
+    # ── Branche 1 : `rtfm failed` (job queue, matching par filepath) ──────────
     failures = ctx.get("rtfm_failures") or []
-    from .rtfm_failures import find_failure_for_path
-    failure = find_failure_for_path(failures, pdf_abs)
-    if failure is None:
-        return []
+    failure = None
+    if failures:
+        from .rtfm_failures import find_failure_for_path
+        failure = find_failure_for_path(failures, pdf_abs)
 
-    # Cas spécial file-vanished : si le PDF est physiquement présent, c'est
-    # un drift du cache RTFM (incohérence à reconcile)
-    if failure.bucket == "file-vanished" and pdf_abs.exists():
-        return [_viol(
-            "I16", ref.slug, "ERROR",
-            f"RTFM signale file-vanished sur {failure.filepath!r} "
-            f"mais le PDF est présent sur disque — drift cache RTFM "
-            f"(reconcile requis). error: {failure.error[:120]}",
-            auto_fixable=False,
-        )]
+    if failure is not None:
+        if failure.bucket == "file-vanished" and pdf_abs.exists():
+            violations.append(_viol(
+                "I16", ref.slug, "ERROR",
+                f"RTFM signale file-vanished sur {failure.filepath!r} "
+                f"mais le PDF est présent sur disque — drift cache RTFM "
+                f"(reconcile requis). error: {failure.error[:120]}",
+                auto_fixable=False,
+            ))
+        else:
+            violations.append(_viol(
+                "I16", ref.slug, "WARN",
+                f"RTFM {failure.type} échec bucket={failure.bucket!r} "
+                f"sur {failure.filepath} : {failure.error[:160]}",
+                auto_fixable=False,
+            ))
 
-    # Cas général : on remonte la raison RTFM en WARN
-    return [_viol(
-        "I16", ref.slug, "WARN",
-        f"RTFM {failure.type} échec bucket={failure.bucket!r} "
-        f"sur {failure.filepath} : {failure.error[:160]}",
-        auto_fixable=False,
-    )]
+    # ── Branche 2 : `rtfm check` (drapeau persistant sur le book) ────────────
+    # Skip si déjà flagué par la branche 1 — évite redondance.
+    if not violations:
+        rtfm_checks = ctx.get("rtfm_checks") or {}
+        check_result = rtfm_checks.get(ref.slug)
+        if check_result and check_result.get("books"):
+            book = check_result["books"][0]
+            ingest_reason = book.get("ingest_failure_reason")
+            ocr_reason = book.get("ocr_failure_reason")
+            if ingest_reason or ocr_reason:
+                reasons = []
+                if ingest_reason:
+                    err = (book.get("ingest_failure_error") or "")[:80]
+                    reasons.append(f"ingest:{ingest_reason}:{err}")
+                if ocr_reason:
+                    err = (book.get("ocr_failure_error") or "")[:80]
+                    reasons.append(f"ocr:{ocr_reason}:{err}")
+                violations.append(_viol(
+                    "I16", ref.slug, "WARN",
+                    f"RTFM drapeau persistant sur le book "
+                    f"(slug rtfm={book.get('slug')!r}) : {' | '.join(reasons)}",
+                    auto_fixable=False,
+                ))
+
+    return violations
 
 
 # ─────────────────────────────────────────────────────────────────────────────
