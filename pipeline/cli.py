@@ -10,6 +10,7 @@ from .dispatcher import plan_for, IllegalTransition
 from .transitions import REGISTRY as TRANSITIONS, NotImplementedYet
 from .journal import append_event, append_blocked
 from .linter_wrapper import run_lint
+from .lock import WorkerLock, LockBusyError
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -248,7 +249,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Sous-commandes qui mutent le registre — protégées par WorkerLock pour
+# éviter 2 sessions concurrentes. Les read-only (status, lint, doctor, events)
+# ne sont PAS wrappées.
+_MUTATING_CMDS = {"run", "reactivate-ocr"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cmd in _MUTATING_CMDS:
+        try:
+            with WorkerLock():
+                return args.func(args)
+        except LockBusyError as e:
+            print(f"[lock] {e}", file=sys.stderr)
+            return 2
     return args.func(args)
