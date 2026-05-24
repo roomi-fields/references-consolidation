@@ -250,8 +250,13 @@ P5 — code écrit non testé E2E sur refs réelles : ocr_failed (pas de cas dan
 
 ```
 F1 — testé E2E sur : [collins_2014 (bibkey_fallback OK), bel_2007 (négatif PASS)]
+F1 — code écrit non testé E2E : (aucun)
 F2 — testé E2E sur : [asselin_2000 (MD5 trouvé, DL KO doc), garey_johnson_1979 (MD5 trouvé, DL KO doc)]
+F2 — code écrit non testé E2E : Playwright sous-fix (mismatch versions, abandonné V1)
 F3 — testé E2E sur : [arnold_1982 (positif/success), ito_2014 (négatif/no_match)]
+F3 — code écrit non testé E2E : (aucun)
 F4 — testé E2E sur : [ito_2014 (append OK), ito_2014 (idempotence OK)]
+F4 — code écrit non testé E2E : (aucun)
 P5 — testé E2E sur : [chomsky_1957 (still_pending), lerdahl_2001 (missing R8), aaron_2013 (ok unit)]
+P5 — code écrit non testé E2E : ocr_failed, anomaly_zero_chunks, needs_reacq_post_ocr (branches sans cas dans les 13 actuels)
 ```
