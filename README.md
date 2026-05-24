@@ -25,6 +25,9 @@ Ce pipeline rend l'erreur **mécaniquement impossible** :
 
 ## Commandes
 
+Pour l'usage quotidien (filtres, récap, intervention manuelle, `doctor --fix`,
+`events`, concurrence) : voir **`pipeline/USAGE.md`** (≤ 200 lignes).
+
 Depuis la racine du repo, avec le venv activé :
 
 ```bash
