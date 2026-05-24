@@ -1,6 +1,7 @@
 """CLI argparse — `python -m pipeline <subcommand> [options]`."""
 from __future__ import annotations
 import argparse
+import json
 import sys
 from collections import Counter
 
@@ -10,6 +11,7 @@ from .dispatcher import plan_for, IllegalTransition
 from .transitions import REGISTRY as TRANSITIONS, NotImplementedYet
 from .journal import append_event, append_blocked
 from .linter_wrapper import run_lint
+from . import events as events_mod
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -213,6 +215,40 @@ def cmd_reactivate_ocr(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_events(args: argparse.Namespace) -> int:
+    """Lit le journal JSONL et affiche les transitions filtrées.
+
+    Filtres :
+      --since DATE       (ISO date, journée UTC inclusive)
+      --to STATE         (état cible exact dans la transition)
+      --cited-in SOTA    (intersection avec refs dont cited_in[].name == SOTA)
+      --json             (sortie machine-readable)
+    """
+    since_date = None
+    if args.since:
+        try:
+            since_date = events_mod._parse_iso_date(args.since)
+        except ValueError:
+            print(f"[events] --since invalide : {args.since!r} "
+                  f"(attendu YYYY-MM-DD)", file=sys.stderr)
+            return 2
+
+    raw = events_mod.iter_events(since=since_date)
+    filtered = events_mod.filter_events(
+        raw,
+        to_state=args.to,
+        cited_in=args.cited_in,
+    )
+
+    if args.json:
+        print(json.dumps(filtered, ensure_ascii=False, indent=2))
+    else:
+        print(events_mod.render_text(
+            filtered, since_date, args.to, args.cited_in,
+        ))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m pipeline",
@@ -244,6 +280,18 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Re-évalue les awaiting_rtfm_ocr via rtfm check")
     pra.add_argument("--quiet", action="store_true")
     pra.set_defaults(func=cmd_reactivate_ocr)
+
+    pev = sub.add_parser("events",
+                         help="Lit le journal JSONL filtré (Couche 3)")
+    pev.add_argument("--since",
+                     help="Date ISO inclusive (YYYY-MM-DD), filtre par jour UTC")
+    pev.add_argument("--to", dest="to",
+                     help="État cible filtré (ex: page1_validated)")
+    pev.add_argument("--cited-in", dest="cited_in",
+                     help="Intersection avec refs dont cited_in[].name == valeur")
+    pev.add_argument("--json", action="store_true",
+                     help="Sortie machine-readable JSON")
+    pev.set_defaults(func=cmd_events)
 
     return p
 
