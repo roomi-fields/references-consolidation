@@ -9,16 +9,21 @@ REFS = REGISTRY / "refs"
 JOURNAL = REGISTRY / "_journal"
 QUARANTINE = REGISTRY / "_quarantine"
 
-PLUGIN_LIB = Path.home() / ".claude/plugins/source-collector/lib"
+# Helpers locaux au plugin (lib/ à la racine du repo).
+# P0 refactor : helpers copiés depuis source-collector pour self-containment.
+LIB_PATH = Path(__file__).parent.parent / "lib"
 TOOLS = REGISTRY / "tools"
 
 # DB RTFM du projet doctoral (utilisée par Couche 5 — corrélation des échecs).
 # Hardcodée comme VAULT : ce repo ne tourne que sur la machine du doctorant.
+# (à refactorer en env var en P1)
 RTFM_DB = Path.home() / "dev/musicology-phd/.rtfm/library.db"
 
-# Insère le plugin lib dans sys.path pour que `import validate_pdf_content` marche.
-if str(PLUGIN_LIB) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_LIB))
+# Insère lib/ dans sys.path pour que `import validate_pdf_content`,
+# `import s2_resolver`, etc. marchent (ces helpers sont sans package
+# parent, ils s'importent au niveau racine).
+if str(LIB_PATH) not in sys.path:
+    sys.path.insert(0, str(LIB_PATH))
 
 # Etats finaux / acceptés (le worker ne les fait pas progresser).
 TERMINAL_STATES = {"sota_cited_confirmed", "retracted"}

@@ -11,8 +11,10 @@ La fonction `run_cascade(ref)` orchestre les 9 étapes et retourne le premier
 succès ou un verdict "cascade_exhausted".
 """
 from __future__ import annotations
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -23,7 +25,7 @@ from typing import Callable
 
 import yaml  # noqa: F401
 
-from .config import SOURCES, QUARANTINE, PLUGIN_LIB  # noqa: F401
+from .config import SOURCES, QUARANTINE, LIB_PATH  # noqa: F401
 from .registry import Ref
 from .breakers import BreakerRegistry
 
@@ -388,176 +390,9 @@ def try_archive_org(ref: Ref) -> tuple[str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Source 6 — Sci-Hub multi-mirror (via helper s2_resolver)
+# Source 6/7 — Sci-Hub et Anna's Archive — EXTRAITS dans lib/shadow/ (opt-in)
+# Voir RESEARCH_ENABLE_SHADOW_LIBS=1 + DISCLAIMER.md
 # ─────────────────────────────────────────────────────────────────────────────
-
-def try_scihub(ref: Ref) -> tuple[str, dict]:
-    doi = _doi(ref)
-    if not doi:
-        return "no_source", {"reason": "no_doi"}
-    tmp = Path(tempfile.mkstemp(suffix=".pdf", prefix="scihub_")[1])
-    try:
-        from s2_resolver import try_scihub as helper_scihub
-        ok = helper_scihub(doi, tmp)
-        if not ok or not tmp.exists() or tmp.stat().st_size < 3000:
-            return "failed", {"reason": "scihub_no_pdf"}
-        data = tmp.read_bytes()
-    except Exception as e:
-        return "failed", {"reason": f"scihub_helper:{type(e).__name__}"}
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-    return _save_and_validate(data, ref)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Source 7 — Anna's Archive
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _aa_md5_from_doi(doi: str) -> tuple[str | None, str]:
-    """AA `/scidb/<doi>` → MD5. Retourne (md5_or_None, info_string)."""
-    from urllib.parse import quote
-    import re
-    scidb_url = f"https://annas-archive.gl/scidb/{quote(doi, safe=':/')}"
-    html = _http_get(scidb_url, timeout=30)
-    if not html:
-        return None, "scidb_unreachable"
-    m = re.search(rb"/md5/([0-9a-f]{32})", html or b"")
-    if not m:
-        return None, "scidb_no_md5"
-    return m.group(1).decode(), "scidb_match"
-
-
-def _aa_md5_from_title(title: str, author: str) -> tuple[str | None, str]:
-    """F2 — title-search AA, extraction MD5 directe depuis HTML.
-
-    Le helper `lib/annas_archive.AnnasArchive.search_books` retourne actuellement
-    des BookData aux champs vides (parser BeautifulSoup cassé ou HTML AA modifié
-    — observé 2026-05-24). Pour ne pas dépendre de ce parser, on fetch
-    directement la page de search et on extrait les `<a href="/md5/...">`
-    associés à leur contexte titre.
-
-    Anti-homonymie : on filtre les hits dont le bloc HTML contient au moins
-    un mot distinctif (≥ 5 lettres) du titre demandé. La sécurité finale
-    reste la page 1 validation post-DL (`_save_and_validate`).
-
-    Retourne (md5_or_None, info_string).
-    """
-    if not title:
-        return None, "no_title_for_aa_search"
-    from urllib.parse import quote
-    import re
-    query = f"{title} {author}".strip() if author else title
-    # Forcer recherche dans les contenus "main" (livres+articles), pas "journals"
-    search_url = f"https://annas-archive.gl/search?q={quote(query)}&ext=pdf"
-    html_bytes = _http_get(search_url, timeout=30)
-    if not html_bytes:
-        return None, "aa_search_unreachable"
-    html = html_bytes.decode("utf-8", errors="replace")
-
-    # Extraction structurée : `re.split` avec capture donne
-    #   [head, md5_1, chunk_1, md5_2, chunk_2, ...].
-    # On strip les tags HTML de chaque chunk pour avoir du texte plain
-    # (titre + auteur visible).
-    parts = re.split(r'/md5/([0-9a-f]{32})', html)
-    if len(parts) < 3:
-        return None, "aa_no_md5_in_search_html"
-
-    distinctive = [w.lower() for w in title.replace("-", " ").split()
-                   if len(w) >= 5 and w.isalpha()]
-    author_norm = (author or "").lower().split()[0] if author else None
-
-    # Itérer sur les paires (md5, chunk)
-    hits_examined = 0
-    for i in range(1, len(parts) - 1, 2):
-        md5 = parts[i]
-        chunk = parts[i + 1][:2500]  # bornes raisonnables
-        # Strip HTML tags
-        text = re.sub(r'<[^>]+>', ' ', chunk)
-        text = re.sub(r'\s+', ' ', text).lower()
-        hits_examined += 1
-        if distinctive:
-            matches = [w for w in distinctive if w in text]
-            if not matches:
-                continue
-            if author_norm and author_norm not in text:
-                # Mot distinctif présent mais pas l'auteur — homonymie probable
-                continue
-            return md5, f"aa_title_search_match:kw={matches[0]!r}"
-        else:
-            # Pas de mot distinctif — accepter le 1er hit, page 1 valide en aval
-            return md5, "aa_first_hit_no_distinctive_words"
-    return None, f"aa_no_keyword+author_match_in_{hits_examined}_hits"
-
-
-def _md5_download_cascade(md5: str, ref: Ref, via_label: str) -> tuple[str, dict]:
-    """Cascade DL libgen.li → library.lol pour un MD5 donné. Retourne tuple."""
-    import re
-    # libgen.li
-    libgen_landing = f"https://libgen.li/ads.php?md5={md5}"
-    landing = _http_get(libgen_landing, timeout=30)
-    if landing:
-        m2 = re.search(rb'(get\.php\?[^"\']+)', landing)
-        if m2:
-            dl_url = "https://libgen.li/" + m2.group(1).decode()
-            pdf = _http_get(dl_url, timeout=180, headers={"Referer": libgen_landing})
-            if pdf:
-                r = _save_and_validate(pdf, ref)
-                if r[0] in ("success", "page1_failed"):
-                    r[1]["md5"] = md5
-                    r[1]["via"] = f"{via_label}_libgen"
-                    return r
-    # library.lol fallback
-    lib_url = f"https://library.lol/main/{md5.upper()}"
-    pdf = _http_get(lib_url, timeout=60)
-    if pdf:
-        r = _save_and_validate(pdf, ref)
-        if r[0] in ("success", "page1_failed"):
-            r[1]["md5"] = md5
-            r[1]["via"] = f"{via_label}_library_lol"
-            return r
-    return "failed", {"reason": "aa_md5_found_but_no_dl", "md5": md5,
-                       "via_attempted": [f"{via_label}_libgen", f"{via_label}_library_lol"]}
-
-
-def try_annas_archive(ref: Ref) -> tuple[str, dict]:
-    """AA cascade (F2 — title-fallback en plus de scidb DOI).
-
-    Ordre :
-      1. Si DOI : AA `/scidb/<doi>` → MD5
-      2. Sinon (F2) : AA `search_books(title + author)` → MD5
-      3. Cascade DL : libgen.li → library.lol
-      4. Anti-homonymie : `_save_and_validate` filtre via page 1 validation.
-
-    Playwright `try_annas_slow` (Turnstile sur AA `/slow_download`) **non
-    branché en V1** : Playwright sur WSL2 instable, ~5-10 refs concernées
-    historiquement, gérables en queue manuelle.
-    """
-    doi = _doi(ref)
-    md5 = None
-    via_label = None
-
-    if doi:
-        md5, info = _aa_md5_from_doi(doi)
-        if md5:
-            via_label = "aa_scidb"
-        elif info == "scidb_unreachable":
-            return "failed", {"reason": info}
-        # Si scidb_no_md5 et qu'on a un titre, on retombe sur title-search.
-
-    if not md5:
-        author = (ref.frontmatter.get("author") or "").strip()
-        title = (ref.frontmatter.get("title") or "").strip()
-        md5, info = _aa_md5_from_title(title, author)
-        if md5:
-            via_label = "aa_title"
-        else:
-            return "no_source", {"reason": info}
-
-    return _md5_download_cascade(md5, ref, via_label)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -630,18 +465,48 @@ def try_websearch(ref: Ref) -> tuple[str, dict]:
 # Orchestrateur
 # ─────────────────────────────────────────────────────────────────────────────
 
-CASCADE: list[tuple[str, Callable[[Ref], tuple[str, dict]]]] = [
-    ("crossref_oa", try_crossref_oa),
-    ("arxiv", try_arxiv),
-    ("openalex_oa", try_openalex),
-    ("unpaywall", try_unpaywall),
-    ("hal", try_hal),
-    ("core", try_core),
-    ("archive_org", try_archive_org),  # F3 — étape 5c (2026-05-24)
-    ("scihub", try_scihub),
-    ("annas_archive", try_annas_archive),
-    ("websearch", try_websearch),
-]
+_shadow_disclaimer_shown = False
+
+
+def _warn_shadow_disclaimer_once() -> None:
+    """Affiche le disclaimer shadow libs une seule fois par session."""
+    global _shadow_disclaimer_shown
+    if _shadow_disclaimer_shown:
+        return
+    _shadow_disclaimer_shown = True
+    print(
+        "\n[paper-trail] WARNING: shadow libraries enabled.\n"
+        "Anna's Archive and Sci-Hub may violate copyright in your\n"
+        "jurisdiction. You confirm you have the legal right to access\n"
+        "the downloaded material. See DISCLAIMER.md for details.\n",
+        file=sys.stderr,
+    )
+
+
+def _build_cascade() -> list[tuple[str, Callable[[Ref], tuple[str, dict]]]]:
+    """Construit la cascade — shadow libs conditionnelles via env var."""
+    cascade = [
+        ("crossref_oa", try_crossref_oa),
+        ("arxiv", try_arxiv),
+        ("openalex_oa", try_openalex),
+        ("unpaywall", try_unpaywall),
+        ("hal", try_hal),
+        ("core", try_core),
+        ("archive_org", try_archive_org),  # F3 — étape 5c (2026-05-24)
+    ]
+    if os.environ.get("RESEARCH_ENABLE_SHADOW_LIBS") == "1":
+        from lib.shadow.scihub import try_scihub
+        from lib.shadow.annas_archive import try_annas_archive
+        _warn_shadow_disclaimer_once()
+        cascade += [
+            ("scihub_optin", try_scihub),
+            ("annas_archive_optin", try_annas_archive),
+        ]
+    cascade.append(("websearch", try_websearch))
+    return cascade
+
+
+CASCADE: list[tuple[str, Callable[[Ref], tuple[str, dict]]]] = _build_cascade()
 
 
 def already_tried(ref: Ref, source: str) -> bool:

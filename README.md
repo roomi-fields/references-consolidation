@@ -1,113 +1,147 @@
-# references-consolidation
+# paper-trail
 
-Pipeline d'acquisition et de validation de références bibliographiques
-pour le projet doctoral de musicologie computationnelle de Romain Peyrichou.
+Plugin Claude Code **anti-hallucination** pour la recherche scientifique.
 
-## Pourquoi ce projet existe
+> Crée des SOTAs / revues de littérature **garantis sans fabrication**,
+> audite les SOTAs et articles existants (purge ou warnings), valide
+> mécaniquement chaque citation via un moteur strict : FSM 8 états +
+> cascade d'acquisition PDF + page 1 anti-homonymie + 19 invariants de
+> cohérence registre.
 
-Le paper 9α v1 (Computational Linguistics, 2026-02) a été retiré du processus
-de revue après détection de **12 erreurs bibliographiques** dont une
-attribution inversée et un *quote* fabriqué. La cause racine : citations
-écrites « de mémoire » sans vérification de la source.
+## Pourquoi ce plugin existe
 
-Ce pipeline rend l'erreur **mécaniquement impossible** :
+Paper 9α v1 (Computational Linguistics, 2026-02) a été retiré du
+processus de revue après détection de **12 erreurs bibliographiques**
+dont une attribution inversée et un *quote* fabriqué. Cause racine :
+citations écrites « de mémoire » sans vérification.
 
-- **Machine à états stricte** (FSM 8 états) : aucune ref ne peut être citée
-  sans avoir traversé acquisition + page 1 validation + claim verification.
-- **Anti-homonymie** à chaque étape : validation page 1 (auteur attendu +
-  similarité titre + zéro mots-clés off-domain), seuils stricts (Crossref
-  title_similarity ≥ 0.7, AA distinctive keywords obligatoires).
-- **Cascade 10 niveaux** d'acquisition avec logging de toutes les
-  tentatives (`acquisition_attempts[]`).
-- **Auto-fix** des dérives connues (R8 : `pdf_path` doublement préfixé).
-- **`assert_coverage.py`** : garde-fou mécanique qui refuse exit 0 si une
-  étape n'a pas son tableau de 2+ refs testées E2E.
+Ce plugin rend l'erreur **mécaniquement impossible** :
 
-## Commandes
+- **Machine à états stricte** (FSM 8 états) — aucune ref ne peut être
+  citée sans avoir traversé acquisition + page 1 validation + claim
+  verification
+- **Anti-homonymie** à chaque étape — validation page 1 (auteur attendu +
+  similarité titre + zéro mots-clés off-domain)
+- **Cascade 10 niveaux** d'acquisition PDF avec logging exhaustif des
+  tentatives
+- **19 invariants doctor** (I1-I19) cross-session — détection automatique
+  des dérives du registre
+- **`assert_coverage.py`** — garde-fou mécanique qui refuse une release
+  si une étape n'a pas son tableau de tests E2E
 
-Pour l'usage quotidien (filtres, récap, intervention manuelle, `doctor --fix`,
-`events`, concurrence) : voir **`pipeline/USAGE.md`** (≤ 200 lignes).
+## Statut
+
+**v0.1.0 — en cours de construction.**
+
+Voir `plans/PLUGIN_EXECUTION_PLAN.md` pour le plan d'exécution en 6
+phases (P0 fait, P1-P5 à venir).
+
+Le **worker B** (moteur Python sous `pipeline/`) est complet et testé
+(19/19 invariants synthétiques, idempotence, concurrence, événements).
+Les skills, commands, agents, hooks et docs sont en cours
+d'intégration.
+
+## Quick start
+
+(Section à compléter en P5 — pour l'instant l'installation directe via
+`/plugin install` n'est pas garantie stable.)
+
+Workflow utilisateur cible :
+
+```
+/paper-trail:new-sota "Petri nets in music notation"
+  → recherche multi-source (paper-search MCP)
+  → propositions de refs candidates
+  → cascade d'acquisition PDFs
+  → page 1 validation anti-homonymie
+  → rédaction du SOTA avec UNIQUEMENT les refs validées
+
+/paper-trail:audit-sota path/to/SOTA_Existing.md [--purge]
+  → audit des refs citées (existence, accessibilité, hallucination ?)
+  → option --purge : retire automatiquement les hallucinations
+
+/paper-trail:audit-article path/to/Paper.tex [--warn]
+  → audit local PDF↔claim pour chaque citation
+  → option --warn : insère commentaires \todo{} dans une copie .bak
+
+/paper-trail:doctor [--fix]
+  → vérifie 19 invariants de cohérence du registre
+  → option --fix : auto-fix les invariants safe (I4, I6, I9)
+```
+
+## Sous-commandes worker B (déjà disponibles)
 
 Depuis la racine du repo, avec le venv activé :
 
 ```bash
 python -m pipeline status              # comptes par état
-python -m pipeline run [--ref X]       # pousse les refs actives, lint + doctor en fin
+python -m pipeline run [--ref X]       # pousse les refs actives
 python -m pipeline run --dry-run       # affiche les plans sans muter
-python -m pipeline run --no-doctor     # skip les invariants I1-I15 en fin de run
 python -m pipeline lint                # invariants R1-R10 (linter du registry)
-python -m pipeline doctor              # invariants I1-I15 (sur-couche worker)
-python -m pipeline doctor --fix        # auto-fix les violations auto-fixables (I4, I6, I9, I5 semi)
-python -m pipeline doctor --severity warn  # filtre min (info/warn/error)
-python -m pipeline doctor --json       # sortie machine-readable
-python -m pipeline reactivate-ocr      # re-évalue les awaiting_rtfm_ocr via rtfm check
+python -m pipeline doctor [--fix]      # invariants I1-I19
+python -m pipeline events --since DATE # journal JSONL filtré
+python -m pipeline reactivate-ocr      # re-évalue les awaiting_rtfm_ocr
 ```
 
 Tests E2E :
 
 ```bash
-python pipeline/tests/test_f1_negative.py            # test anti-homonymie F1
-python pipeline/tests/test_invariants_synthetic.py   # 15/15 fixtures invariants I1-I15
-python pipeline/tests/assert_coverage.py             # garde-fou couverture (F1-F4, P5, I1-I15)
-```
-
-## Dépendances externes (hors repo)
-
-Ce repo ne fonctionne **pas en isolation** — il dépend de ressources
-externes maintenues ailleurs :
-
-| Ressource | Localisation | Rôle |
-|---|---|---|
-| Registry refs YAML | `/mnt/d/Obsidian/Articles/Projets/Ontologie musicale/10_SOURCES/_registry/refs/*.md` | Source de vérité des 909 références |
-| Plugin source-collector | `~/.claude/plugins/source-collector/lib/` | Helpers (validate_pdf_content, oa_finder, s2_resolver, annas_archive, archive_org_helper, download_books) |
-| RTFM CLI | `~/.local/bin/rtfm` | Index local indexé du corpus |
-| lint_registry.py | `/mnt/d/.../10_SOURCES/_registry/tools/lint_registry.py` | Linter d'invariants R1-R10 |
-
-Les chemins sont configurés en absolu dans `pipeline/config.py`.
-
-## Installation
-
-```bash
-cd /home/romi/dev/mcp/references-consolidation
-python3 -m venv venv
-venv/bin/python -m pip install -r requirements.txt
-
-# Test rapide : doit retourner ~909 refs
-venv/bin/python -m pipeline status
+python pipeline/tests/test_invariants_synthetic.py  # 19/19 invariants
+python pipeline/tests/test_f1_negative.py           # anti-homonymie F1
+python pipeline/tests/assert_coverage.py            # garde-fou couverture
 ```
 
 ## Architecture
 
-Voir `plans/B_worker_FSM_pipeline.md` pour la spec complète et
-`plans/B_worker_fixes_2026-05-24.md` pour l'historique des corrections.
+- **`pipeline/`** : worker B en Python (FSM + cascade + doctor + RTFM
+  bridge). Voir `pipeline/ARCHITECTURE.md` et `pipeline/USAGE.md`.
+- **`lib/`** : helpers PDF acquisition (oa_finder, s2_resolver,
+  archive_org_helper, validate_pdf_content). Sous `lib/shadow/` :
+  Anna's Archive et Sci-Hub, opt-in strict.
+- **`skills/`, `commands/`, `agents/`, `hooks/`** : enveloppe Claude
+  Code (en cours d'intégration).
+- **`adapters/`** : layouts vault (obsidian, flat, zotero stub).
+- **`docs/`** : documentation utilisateur.
+- **`plans/`** : plans de conception et d'exécution.
 
-Modules :
+## Configuration
 
-- `pipeline/config.py` — chemins et constantes
-- `pipeline/registry.py` — load/save atomique des fichiers refs
-- `pipeline/journal.py` — événements append-only
-- `pipeline/dispatcher.py` — décide la prochaine transition
-- `pipeline/transitions.py` — fonctions de transition de la FSM
-- `pipeline/cascade.py` — cascade 10 niveaux d'acquisition
-- `pipeline/rtfm_helper.py` — wrapper `rtfm check --path`
-- `pipeline/linter_wrapper.py` — wrapper du linter du registry
-- `pipeline/invariants.py` — 15 fonctions `check_I<n>` (Couche 1)
-- `pipeline/doctor.py` — orchestrateur invariants + auto-fix + rapport (Couche 1)
-- `pipeline/cli.py` — argparse `python -m pipeline ...`
-- `pipeline/tests/` — coverage_set, coverage_run, assert_coverage,
-  test_f1_negative, test_invariants_synthetic, fixtures synthétiques
+Variables d'environnement :
 
-## Discipline « livré »
+```bash
+# Vault & registre (defaults : ~/research_vault et sous-dossiers)
+export RESEARCH_VAULT_PATH=/path/to/your/vault
+export RESEARCH_SOURCES_PATH=$RESEARCH_VAULT_PATH/sources
+export RESEARCH_REGISTRY_PATH=$RESEARCH_SOURCES_PATH/_registry
 
-Aucune transition n'est annoncée « livrée » sans :
+# Layout du vault (defaults : obsidian)
+export RESEARCH_VAULT_LAYOUT=obsidian   # obsidian | flat | zotero
 
-1. Code écrit et passant les imports.
-2. ≥ 2 refs réelles d'archétypes distincts l'ont franchie avec succès.
-3. Au moins 1 cas négatif documenté (ex: test anti-homonymie sur ref `retracted`).
+# Shadow libraries (opt-in strict — voir DISCLAIMER.md)
+export RESEARCH_ENABLE_SHADOW_LIBS=1   # ⚠️ active Anna's Archive + Sci-Hub
 
-Garde-fou mécanique : `python pipeline/tests/assert_coverage.py` doit
-retourner exit 0 avant tout message annonçant « livré ».
+# Skip doctor en fin de session
+export RESEARCH_SKIP_END_DOCTOR=1      # désactive le SessionEnd hook
+```
 
-## Licence
+## Licence et attributions
 
-MIT — voir `LICENSE`.
+- **Licence** : MIT (voir `LICENSE`)
+- **Shadow libraries** : opt-in strict, voir `DISCLAIMER.md`
+- **Attributions** : voir `NOTICE.md` (composants importés et patterns
+  inspirés de projets tiers)
+
+## Contribuer
+
+Ce plugin est sous développement actif pour un usage de recherche
+doctorale. Le code est public sous MIT mais les contributions externes
+ne sont pas encore activement sollicitées tant que la v0.1.0 n'est pas
+stable. Issues bienvenues sur
+[github.com/roomi-fields/paper-trail/issues](https://github.com/roomi-fields/paper-trail/issues).
+
+## Liens
+
+- Plan d'exécution : `plans/PLUGIN_EXECUTION_PLAN.md`
+- Architecture worker B : `pipeline/ARCHITECTURE.md`
+- Vision système globale : `plans/SYSTEM_ARCHITECTURE.md`
+- Utilisation worker B : `pipeline/USAGE.md`
