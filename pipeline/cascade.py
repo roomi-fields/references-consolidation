@@ -144,6 +144,82 @@ def _save_and_validate(data: bytes, ref: Ref) -> tuple[str, dict]:
     }
 
 
+def _check_local_pdf(ref: Ref) -> tuple[str, dict] | None:
+    """Step 0 de la cascade : check si le PDF est déjà sur disque.
+
+    Vérifie dans l'ordre :
+      1. `pdf_path` du frontmatter (ref déjà associée)
+      2. `legacy_pdf_path` du frontmatter (chemin archivé au reset)
+
+    Si un PDF existe à l'une de ces locations :
+      - Valide page 1 anti-homonymie sur le fichier in-place
+      - Si valide : retourne ("success", info) avec pdf_path + sha256
+      - Si page 1 KO ou format invalide : retourne None (laisse la
+        cascade externe re-essayer ailleurs)
+      - Si OCR nécessaire (scan) : retourne ("scan_needs_ocr", info)
+        pour bascule en awaiting_rtfm_ocr
+
+    Évite de re-télécharger un PDF déjà présent localement.
+    """
+    candidates: list[tuple[str, Path]] = []
+    for key in ("pdf_path", "legacy_pdf_path"):
+        pp = ref.frontmatter.get(key)
+        if not pp:
+            continue
+        abs_p = SOURCES / pp
+        if abs_p.exists() and abs_p.is_file():
+            candidates.append((key, abs_p))
+
+    # Reasons indiquant un problème technique transitoire (pas un mismatch
+    # de contenu). Dans ces cas, on accepte le PDF tel quel — la validation
+    # sera refaite par pdf_acquired_dispatch.
+    _TRANSIENT_REASONS = (
+        "pdf_slow_extract", "pdftotext_timeout", "pdf_text_extract_failed",
+        "pdfium_timeout", "extraction_timeout",
+    )
+
+    for source_key, abs_p in candidates:
+        # Vérifie validité PDF (magic bytes + taille minimale)
+        try:
+            data = abs_p.read_bytes()
+        except OSError:
+            continue
+        if not _is_valid_pdf(data):
+            continue  # corrupt or wrong format, let cascade retry
+
+        # Validation page 1 in-place
+        is_ok, reason = _validate_page1(abs_p, ref)
+        import hashlib
+        sha = hashlib.sha256(data).hexdigest()
+        rel_path = str(abs_p.relative_to(SOURCES))
+        info = {
+            "pdf_path": rel_path,
+            "pdf_sha256": sha,
+            "size_kb": abs_p.stat().st_size // 1024,
+            "matched_via": source_key,
+        }
+
+        if is_ok:
+            return "success", info
+
+        reason_lower = (reason or "").lower()
+
+        # Cas scan / OCR : on garde le fichier, route vers OCR
+        if "scan" in reason_lower or "ocr" in reason_lower:
+            return "scan_needs_ocr", {**info, "reason": reason}
+
+        # Cas problème technique transitoire (timeout pdftotext, etc.) :
+        # on accepte le PDF tel quel ; pdf_acquired_dispatch re-validera.
+        if any(t in reason_lower for t in _TRANSIENT_REASONS):
+            return "success", {**info, "page1_deferred": reason}
+
+        # Cas mismatch de contenu (homonymie, mauvais auteur, off-domain) :
+        # on n'utilise pas ce PDF local, la cascade externe re-essaye.
+        # (next candidate dans la boucle si y en a un autre)
+
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Source 1 — Crossref OA URL (REST direct)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -547,11 +623,28 @@ def run_cascade(ref: Ref, breakers: BreakerRegistry | None = None
     Si `breakers` n'est pas fourni, utilise le registre global de la session.
     Une source dont le breaker est ouvert est skippée avec verdict
     `skipped_breaker_open` (et reason explicite).
+
+    **Step 0** (local-first) : avant de tenter les sources externes, on
+    vérifie si le PDF est déjà sur disque (pdf_path ou legacy_pdf_path
+    du frontmatter). Si oui, on valide page 1 in-place et on saute la
+    cascade. Évite de re-télécharger un PDF déjà présent localement.
     """
     if breakers is None:
         breakers = get_breakers()
 
     attempts: list[dict] = []
+
+    # Step 0 — local PDF check
+    local_result = _check_local_pdf(ref)
+    if local_result is not None:
+        verdict, info = local_result
+        attempts.append({"source": "local_pdf_index", "verdict": verdict,
+                         **info})
+        if verdict in ("success", "scan_needs_ocr"):
+            return verdict, attempts
+        # Si page1_failed (jamais retourné pour l'instant) ou autre,
+        # on log et on continue avec la cascade externe.
+
     for source, fn in CASCADE:
         if already_tried(ref, source):
             attempts.append({"source": source, "verdict": "skipped_already_tried"})

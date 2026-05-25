@@ -306,6 +306,22 @@ def uid_resolved_to_pdf_acquired(ref: Ref) -> TransitionResult:
                                 success["source"],
                                 meta={"pdf_path": success["pdf_path"]})
 
+    if verdict == "scan_needs_ocr":
+        # PDF local trouvé mais scan-only — route direct vers awaiting_rtfm_ocr
+        info = attempts[-1]
+        ref.frontmatter["pdf_path"] = info["pdf_path"]
+        from datetime import datetime, timezone
+        ref.frontmatter["ocr_pending_since"] = (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        append_state_history(ref, "awaiting_rtfm_ocr", by="worker_b",
+                             meta={"via": info["source"],
+                                   "matched_via": info.get("matched_via")})
+        save_ref(ref)
+        return TransitionResult(True, "uid_resolved", "awaiting_rtfm_ocr",
+                                info["source"],
+                                meta={"pdf_path": info["pdf_path"]})
+
     # Cascade épuisée — on bascule en cascade_exhausted_needs_manual
     ref.frontmatter["blocked_by"] = "cascade_exhausted_needs_manual"
     save_ref(ref)
