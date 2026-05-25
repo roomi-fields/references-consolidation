@@ -374,3 +374,38 @@ I19 — code écrit non testé E2E : pdftext absent (détection None, skip) — 
 - I19 sources texte : la liste `_TEXT_PDF_SOURCES` est gelée sur `cascade.CASCADE`. Si une nouvelle source est ajoutée à la cascade, il faut mettre à jour `_TEXT_PDF_SOURCES`.
 - I18 reste opt-in (`--check-sha`) — sur registre réel de 909 PDFs sur HDD lent, c'est l'ordre de la minute. Pas adapté à un appel par défaut.
 
+
+---
+
+## Skills du plugin (S1-S6) — preuves de test
+
+Section ajoutée 2026-05-25 lors de la phase P5 du plugin paper-trail.
+Chaque skill du plugin doit avoir une preuve de test (E2E ou
+structurelle) consignée ici avant chaque livraison.
+
+```
+S1 pdf-cascade — testé E2E sur : [arnold_1982_mathematical_model_shruti (dry-run plan affiché, sans mutation), test_skills_structure (frontmatter validé)]
+S1 pdf-cascade — code écrit non testé E2E : cascade complète shadow opt-in en cours d'exécution (background, validation post-fin), validation page 1 sur PDF image-only (codé, fixture absente)
+
+S2 registry-doctor — testé E2E sur : [registre réel 909 refs (rapport produit, 101 ERROR / 161 WARN signalés), 19 fixtures synthétiques (19/19 OK via test_invariants_synthetic.py)]
+S2 registry-doctor — code écrit non testé E2E : --check-sha sur registre réel (recompute 909 sha256, ~minutes), --correlate-rtfm avec failures réelles (RTFM DB vide actuellement)
+
+S3 sota-writer — testé E2E sur : [migration depuis musicology-phd (220 LOC, validation structurelle frontmatter via test_skills_structure)]
+S3 sota-writer — code écrit non testé E2E : workflow 4 phases complet sur sujet réel (paper-search MCP + cascade + lecture + rédaction, à valider en session interactive avec plugin installé)
+
+S4 sota-auditor — testé E2E sur : [migration depuis musicology-phd sota-curator (249 LOC, validation structurelle frontmatter)]
+S4 sota-auditor — code écrit non testé E2E : --purge sur SOTA réel avec ref retracted (à valider une fois le drift résiduel investigué post-cascade)
+
+S5 citation-receipts — testé E2E sur : [tools/citation_audit.py parsing LaTeX (test unit \cite{a},\cite{b} → 2 citations correctement parsées, voir transcript session 2026-05-25)]
+S5 citation-receipts — code écrit non testé E2E : --warn mode (insertion \todo dans .bak), audit complet sur paper réel (.tex avec 20+ citations)
+
+S6 paper-writer — testé E2E sur : [test_skills_structure (frontmatter + body validés), migration musicology-phd 67 LOC (diff vs source validé)]
+S6 paper-writer — code écrit non testé E2E : workflow complet IMRaD sur sujet réel (Methods/Results/Discussion + Related Work depuis SOTAs audités, audit-article pré-soumission)
+```
+
+### Notes méthodologiques sur les S1-S6
+
+- **S1, S2** : skills wrappers autour du worker Python — le worker B est testé à 19/19 invariants synthétiques + idempotence + concurrence + events. La validation E2E "dry-run" suffit pour le wrapper.
+- **S3, S4, S6** : skills d'orchestration interactive (Claude Code skill). Le test E2E réel nécessite une session Claude Code avec le plugin installé sur un vrai sujet de recherche. À valider une fois v0.1 publiée localement.
+- **S5** : skill avec outil Python sous-jacent (`citation_audit.py`). Le parsing LaTeX et le matching keywords sont testables sans Claude Code ; le format RECEIPTS.md et le mode `--warn` nécessitent un fichier source réel.
+- Les skills migrées depuis musicology-phd (S3, S4, S5, S6) tournaient déjà en production interne sur le projet doctoral avant migration. La généralisation a retiré les chemins hardcodés et les exemples projet-spécifiques mais préservé la philosophie.
