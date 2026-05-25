@@ -1,0 +1,26 @@
+{
+  "description": "paper-trail hooks — post-edit doctor check on refs + session-end doctor sweep",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post_edit_ref_check.py\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_end_doctor.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
