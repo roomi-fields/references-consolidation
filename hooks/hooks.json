@@ -1,6 +1,17 @@
 {
-  "description": "paper-trail hooks — post-edit doctor check on refs + session-end doctor sweep",
+  "description": "paper-trail hooks — PreToolUse SOTA wikilink check, PostToolUse doctor on refs, SessionEnd doctor sweep",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/precheck_sota_wikilinks.py\""
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit",
