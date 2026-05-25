@@ -200,6 +200,70 @@ CASCADE += [("websearch", try_websearch)]
 
 **Timer** : 90 min × 2 (config+adapters, refactor I11/I12).
 
+### P2.5 — Reset registre + skill pdf-identifier (ajoutée post-P2)
+
+**Contexte ajouté 2026-05-25** : décision utilisateur de reset le
+registre à un état propre, car l'état hérité accumulait du drift
+non-fiable (588 ERROR I8 + sota_cited_confirmed historiques sans
+audit). On préserve les 120 `retracted` (info de validation
+historique) et on remet 789 refs à `candidate`. PDFs préservés sur
+disque mais déconnectés du registre.
+
+**Livrables P2.5** :
+
+A) **Script de reset** (livré) :
+- `tools/reset_registry.py` — pour chaque ref non-retracted, archive
+  l'ancien `state` dans `legacy_state` et `pdf_path` dans
+  `legacy_pdf_path`, vide acquisition_attempts/state_history/blocked
+  /page1_validation_log, set state=candidate
+- Mode dry-run par défaut, `--apply` pour muter
+- Snapshot tar préalable obligatoire
+- Exécuté 2026-05-25 : 789 reset / 0 échec / 120 retracted préservés
+
+B) **Skill pdf-identifier** (à livrer) :
+- `skills/pdf-identifier/SKILL.md` — workflow inverse de la cascade :
+  pour chaque PDF orphelin sur disque, identifier sa ref via page 1
+  (auteur + titre + année extraits via `pdftotext` + match avec
+  registre)
+- `commands/paper-trail-identify-pdfs.md` — `/paper-trail:identify-pdfs`
+- `agents/pdf-matcher.md` — sub-agent qui matche un PDF candidat
+  contre N refs candidates (similarité titre, match auteur)
+- `tools/identify_orphan_pdfs.py` — scan SOURCES/, extrait page 1 de
+  chaque PDF, propose une association à une ref candidate du registre
+
+**Pourquoi nécessaire** : après le reset, 789 candidates n'ont plus
+de `pdf_path` mais les PDFs sont toujours sur disque. Sans
+pdf-identifier, lancer `pipeline run --state candidate` va re-télécharger
+des PDFs déjà présents (gaspillage + risque écrasement). pdf-identifier
+permet de pré-associer les PDFs avant la cascade.
+
+**Workflow cible** :
+```
+1. /paper-trail:identify-pdfs --scan
+   → scan SOURCES/, pour chaque PDF orphelin :
+     - extrait page 1 (pdftotext)
+     - cherche match unique dans le registre (auteur + titre)
+     - si match unique : propose association
+     - si ambigu : alerte le curator
+   → output : liste des associations proposées + refs orphelines
+
+2. /paper-trail:identify-pdfs --apply
+   → applique les associations (set pdf_path, pdf_sha256,
+     state=page1_validated si validation OK ; sinon pdf_acquired)
+
+3. /paper-trail:cascade --state candidate
+   → relance la cascade UNIQUEMENT sur les refs sans pdf_path
+```
+
+**Critère d'acceptance pdf-identifier** :
+- Sur les 789 candidates post-reset : N PDFs identifiés et associés
+  sans intervention humaine (estimé > 500 vu la qualité historique)
+- 0 association erronée (validation page 1 anti-homonymie obligatoire)
+- Refs avec PDFs ambigus listées pour décision curator
+
+**Estimation** : 90 min × 2 sous-tâches (skill + outil Python, agent
+pdf-matcher).
+
 ### P2 — Skills core wrapper worker B (2 sessions × 90 min × 2-3)
 
 **Objectif** : exposer worker B au système Claude Code.
