@@ -44,6 +44,46 @@ against the actual source text.
 - **Mechanical coverage guard** — refuses to ship a new version
   without explicit test evidence for each component
 
+## Supported sources
+
+paper-trail's acquisition cascade and search layer cover the major
+academic indexing and full-text platforms.
+
+### Open access (default, always enabled)
+
+| Source | Coverage | Used for |
+|---|---|---|
+| **Crossref** | Cross-domain DOI registry, 150M+ records | DOI lookup, metadata, open-access URL |
+| **arXiv** | Preprints (CS, math, physics, q-bio, q-fin, stats, EE) | Full-text PDFs of preprints |
+| **OpenAlex** | 200M+ scholarly works, cross-domain aggregator | Metadata, abstracts, citation graph |
+| **Unpaywall** | 30M+ free full-text articles | OA PDF discovery |
+| **HAL** | French academic repository | Full-text, OA |
+| **CORE** | UK-based aggregator, 200M+ OA records | Full-text fallback |
+| **archive.org** | Digitized books and articles, Internet Archive | Books, older publications, scans |
+| **Semantic Scholar** | AI-curated academic graph, 200M+ papers | Cross-reference, related papers |
+| **PubMed / PMC / bioRxiv / medRxiv** | Biomedical, preprints | Biomedical full-text |
+| **Zenodo / SSRN / DBLP / DOAJ / BASE / IACR / EuropePMC** | Cross-domain | Additional metadata and full-text |
+
+### Shadow libraries (strict opt-in, see DISCLAIMER.md)
+
+| Source | Coverage | Activation |
+|---|---|---|
+| **Sci-Hub** | Paywalled scholarly literature, ~88M papers | `RESEARCH_ENABLE_SHADOW_LIBS=1` |
+| **Anna's Archive** | Books and articles, aggregates Library Genesis, Sci-Hub, Z-Library | `RESEARCH_ENABLE_SHADOW_LIBS=1` |
+
+Shadow-library activation is **explicit** and **per-session**. A
+disclaimer prints to stderr on first use. The user is responsible
+for legal compliance in their jurisdiction. See
+[`DISCLAIMER.md`](DISCLAIMER.md).
+
+### Local indexing (optional MCP integrations)
+
+| Source | Coverage | Activation |
+|---|---|---|
+| **paper-search MCP** | Unified API over 22 platforms above | Configure in `~/.claude/mcp.json` |
+| **NotebookLM MCP** | Books corpus (Q&A with citations) | `RESEARCH_ENABLE_NOTEBOOKLM=1` + MCP config |
+| **RTFM MCP** | Local indexed corpus (code, docs, research) | Configure in `~/.claude/mcp.json` |
+
 ## Quick start
 
 ### Install
