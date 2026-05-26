@@ -107,6 +107,27 @@ def _quarantine(tmp: Path, ref: Ref, reason: str) -> Path:
     return qpath
 
 
+def cleanup_quarantine_for_ref(slug: str) -> int:
+    """Supprime tous les fichiers en quarantaine pour ce slug.
+
+    Appelé quand une ref atteint `page1_validated` : les anciens PDFs
+    rejetés (homonymies, mauvais candidats) n'ont plus d'utilité
+    diagnostique puisque le bon PDF est acquis.
+
+    Retourne le nombre de fichiers supprimés.
+    """
+    if not QUARANTINE.exists():
+        return 0
+    n = 0
+    for f in QUARANTINE.glob(f"{slug}_*.pdf"):
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def _validate_page1(pdf_path: Path, ref: Ref) -> tuple[bool, str]:
     """Wrapper sur validate_pdf_against_ref du plugin."""
     import validate_pdf_content as v

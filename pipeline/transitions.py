@@ -372,12 +372,16 @@ def pdf_acquired_dispatch(ref: Ref) -> TransitionResult:
         }
         ref.frontmatter["page1_validation_log"] = log
         if is_ok:
+            from .cascade import cleanup_quarantine_for_ref
+            n_clean = cleanup_quarantine_for_ref(ref.slug)
             append_state_history(ref, "page1_validated", by="worker_b",
-                                 meta={"probe": category, "verdict": reason})
+                                 meta={"probe": category, "verdict": reason,
+                                       "quarantine_cleaned": n_clean})
             save_ref(ref)
             return TransitionResult(True, "pdf_acquired", "page1_validated",
                                     "probe_ok_validate_passed",
-                                    meta={"probe": category})
+                                    meta={"probe": category,
+                                          "quarantine_cleaned": n_clean})
         # Validation page 1 KO → quarantaine + retour cascade
         # On bascule en needs_reacquisition pour relancer la cascade.
         ref.frontmatter.setdefault("doctor_flags", []).append(
@@ -525,14 +529,18 @@ def awaiting_rtfm_ocr_dispatch(ref: Ref) -> TransitionResult:
     }
     ref.frontmatter["page1_validation_log"] = log
     if is_ok:
+        from .cascade import cleanup_quarantine_for_ref
+        n_clean = cleanup_quarantine_for_ref(ref.slug)
         append_state_history(ref, "page1_validated", by="worker_b_p5",
                              meta={"via": "rtfm_ocr_completion",
-                                   "rtfm_chunks": info["chunks"]})
+                                   "rtfm_chunks": info["chunks"],
+                                   "quarantine_cleaned": n_clean})
         save_ref(ref)
         return TransitionResult(
             True, "awaiting_rtfm_ocr", "page1_validated",
             "rtfm_ocr_completion",
-            meta={"chunks": info["chunks"]},
+            meta={"chunks": info["chunks"],
+                  "quarantine_cleaned": n_clean},
         )
     # Validation page 1 échoue MÊME après OCR : probable homonymie (mauvais
     # contenu acquis), bascule needs_reacq.

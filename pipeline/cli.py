@@ -135,6 +135,21 @@ def _run_one_pass(args: argparse.Namespace) -> dict:
             "blocked": n_blocked, "skipped_terminal": n_skip}
 
 
+def _set_memory_limit(max_gb: float = 1.5) -> None:
+    """Borne la RAM virtuelle du process pour éviter de freezer la machine.
+
+    Si un téléchargement géant ou une fuite mémoire pousse au-delà,
+    Python lèvera MemoryError (capturé en CRASH) au lieu d'épuiser
+    la mémoire système.
+    """
+    try:
+        import resource
+        max_bytes = int(max_gb * 1024 * 1024 * 1024)
+        resource.setrlimit(resource.RLIMIT_AS, (max_bytes, max_bytes))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Boucle principale. Une passe par défaut, ou jusqu'à épuisement avec --loop.
 
@@ -142,6 +157,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     En mode --loop, itère tant que au moins une transition est faite (done > 0)
     ou jusqu'à `--max-iterations` (default 10).
     """
+    _set_memory_limit(1.5)
     loop = getattr(args, "loop", False)
     max_iter = getattr(args, "max_iterations", 10)
 
