@@ -220,6 +220,70 @@ def cmd_run(args: argparse.Namespace) -> int:
     return max(rc_lint, rc_doctor)
 
 
+def cmd_arbitrate(args: argparse.Namespace) -> int:
+    """Décision humaine pour refs problématiques (cascade épuisée, etc.).
+
+    3 décisions :
+      - retract  : ref est un artefact, ne devrait pas exister.
+                   state → `retracted` (terminal).
+      - blocked  : ref existe mais inaccessible (paywall, hors-ligne).
+                   state → `blocked_human:cascade_exhausted`.
+      - investigate : besoin de corriger frontmatter (auteur, titre, doi)
+                   puis relancer cascade. Retire `blocked_by` et appose
+                   un flag `human_investigate`.
+
+    Refuse les décisions sur refs déjà terminales (retracted ou validées).
+    """
+    from .registry import load_ref, save_ref, append_state_history
+    from pathlib import Path
+
+    slug = args.slug
+    path = REFS / f"{slug}.md"
+    if not path.exists():
+        print(f"[ERR] ref introuvable : {slug}", file=sys.stderr)
+        return 2
+    ref = load_ref(path)
+    if ref is None:
+        print(f"[ERR] ref illisible : {slug}", file=sys.stderr)
+        return 2
+
+    if ref.state in ("retracted", "sota_cited_confirmed"):
+        print(f"[NOOP] {slug} déjà terminal ({ref.state})", file=sys.stderr)
+        return 1
+
+    decision = args.decision
+    reason = (args.reason or "").strip() or "manual_arbitration"
+    from_state = ref.state
+
+    if decision == "retract":
+        append_state_history(ref, "retracted", by="human_arbitration",
+                             meta={"reason": reason})
+        ref.frontmatter["retracted_reason"] = reason
+        from datetime import datetime, timezone
+        ref.frontmatter["retracted_at"] = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    elif decision == "blocked":
+        new_state = "blocked_human:cascade_exhausted"
+        append_state_history(ref, new_state, by="human_arbitration",
+                             meta={"reason": reason})
+        ref.frontmatter["blocked_reason"] = reason
+    elif decision == "investigate":
+        flags = ref.frontmatter.setdefault("doctor_flags", [])
+        flags.append(f"human_investigate:{reason}")
+        ref.frontmatter.pop("blocked_by", None)
+        # Pas de mutation de state. La transition normale reprendra.
+    else:
+        print(f"[ERR] décision inconnue : {decision}", file=sys.stderr)
+        return 2
+
+    save_ref(ref)
+    append_event(slug, from_state, ref.frontmatter["state"],
+                 f"arbitrate:{decision}", {"reason": reason})
+    print(f"[ok] {slug}  {from_state} → {ref.frontmatter['state']}  "
+          f"({decision}: {reason[:50]})")
+    return 0
+
+
 def cmd_reactivate_ocr(args: argparse.Namespace) -> int:
     """Re-évalue les refs `awaiting_rtfm_ocr` via `rtfm check --path`.
 
@@ -392,6 +456,17 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Re-évalue les awaiting_rtfm_ocr via rtfm check")
     pra.add_argument("--quiet", action="store_true")
     pra.set_defaults(func=cmd_reactivate_ocr)
+
+    par = sub.add_parser("arbitrate",
+                         help="Décision humaine sur une ref problématique")
+    par.add_argument("slug", help="Slug de la ref à arbitrer")
+    par.add_argument("--decision", required=True,
+                     choices=("retract", "blocked", "investigate"),
+                     help="retract: artefact; blocked: paywall/inaccessible; "
+                          "investigate: corriger frontmatter puis relancer")
+    par.add_argument("--reason", default="",
+                     help="Phrase courte justifiant la décision (loggée)")
+    par.set_defaults(func=cmd_arbitrate)
 
     pdo = sub.add_parser("doctor",
                          help="Lance les invariants I1-I19 (sur-couche worker)")
