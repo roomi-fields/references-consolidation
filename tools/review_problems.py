@@ -210,6 +210,27 @@ def render_ref_section(ref, citations_idx: dict, ord_num: int) -> str:
     sections.append(f"**Recommended action**: {rec}")
     sections.append("")
 
+    # Ready-to-paste arbitrate command (default = recommendation)
+    rec_upper = rec.split("—")[0].strip().split()[0].upper()
+    decision_map = {
+        "RETRACT": "retract",
+        "BLOCKED_HUMAN": "blocked",
+        "INVESTIGATE": "investigate",
+        "WAIT": "investigate",
+        "CONFIRM": "investigate",
+        "REVIEW": "investigate",
+    }
+    decision = decision_map.get(rec_upper, "investigate")
+    short_reason = rec.split("—", 1)[-1].strip().replace("'", "")[:80]
+    sections.append("**Copy-paste si OK** (sinon remplace `" + decision +
+                    "` par retract/blocked/investigate) :")
+    sections.append("```bash")
+    sections.append(f"python3 -m pipeline arbitrate {slug} "
+                    f"--decision {decision} "
+                    f"--reason \"{short_reason}\"")
+    sections.append("```")
+    sections.append("")
+
     # Direct file link
     rel_ref = ref.path.relative_to(VAULT) if VAULT in ref.path.parents else ref.path
     sections.append(f"_Edit ref file_: `{rel_ref}`")
