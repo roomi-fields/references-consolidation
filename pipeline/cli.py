@@ -63,10 +63,11 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return rc
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    """Boucle principale : pour chaque ref active, dispatch + transition + journal.
+def _run_one_pass(args: argparse.Namespace) -> dict:
+    """Une passe de transitions sur les refs actives. Retourne les compteurs.
 
-    En mode --dry-run, n'effectue aucune mutation.
+    Mêmes filtres et logique que `cmd_run`, mais isolé pour permettre la
+    réexécution en boucle (mode `--loop`).
     """
     n_planned = 0
     n_done = 0
@@ -75,7 +76,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     n_pending = 0
 
     for ref in sorted(iter_refs(), key=lambda r: STATE_ORDER.get(r.state, 50)):
-        # Filtres
         if args.state and ref.state != args.state:
             continue
         if args.ref and ref.slug != args.ref:
@@ -131,9 +131,51 @@ def cmd_run(args: argparse.Namespace) -> int:
             append_blocked(ref.slug, from_state, res.blocked_reason or "unknown")
             n_blocked += 1
 
-    print()
-    print(f"Récap session : planned={n_planned}  done={n_done}  pending={n_pending}  "
-          f"blocked={n_blocked}  skipped_terminal={n_skip}")
+    return {"planned": n_planned, "done": n_done, "pending": n_pending,
+            "blocked": n_blocked, "skipped_terminal": n_skip}
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Boucle principale. Une passe par défaut, ou jusqu'à épuisement avec --loop.
+
+    En mode --dry-run, n'effectue aucune mutation.
+    En mode --loop, itère tant que au moins une transition est faite (done > 0)
+    ou jusqu'à `--max-iterations` (default 10).
+    """
+    loop = getattr(args, "loop", False)
+    max_iter = getattr(args, "max_iterations", 10)
+
+    if not loop:
+        stats = _run_one_pass(args)
+        print()
+        print(f"Récap session : planned={stats['planned']}  done={stats['done']}  "
+              f"pending={stats['pending']}  blocked={stats['blocked']}  "
+              f"skipped_terminal={stats['skipped_terminal']}")
+    else:
+        total = {"planned": 0, "done": 0, "pending": 0, "blocked": 0,
+                 "skipped_terminal": 0}
+        iteration = 0
+        while iteration < max_iter:
+            iteration += 1
+            print(f"\n# Loop iteration {iteration}/{max_iter}")
+            stats = _run_one_pass(args)
+            for k in total:
+                total[k] += stats[k]
+            print(f"  → iteration {iteration} : done={stats['done']}  "
+                  f"blocked={stats['blocked']}  pending={stats['pending']}")
+            if stats["done"] == 0:
+                print(f"\n# Loop terminé : 0 transition à l'itération {iteration} "
+                      f"→ épuisement atteint.")
+                break
+        else:
+            print(f"\n# Loop arrêté : max_iterations={max_iter} atteint avec "
+                  f"des transitions encore en cours. Relance `pipeline run --loop` "
+                  f"pour continuer.")
+        print()
+        print(f"Récap CUMULÉ ({iteration} itération(s)) : "
+              f"planned={total['planned']}  done={total['done']}  "
+              f"pending={total['pending']}  blocked={total['blocked']}  "
+              f"skipped_terminal={total['skipped_terminal']}")
 
     rc_lint = 0
     rc_doctor = 0
@@ -323,6 +365,11 @@ def build_parser() -> argparse.ArgumentParser:
     prn.add_argument("--no-doctor", action="store_true",
                      help="Skip les invariants doctor I1-I15 en fin de run")
     prn.add_argument("-v", "--verbose", action="store_true")
+    prn.add_argument("--loop", action="store_true",
+                     help="Boucle jusqu'à épuisement : re-run tant que des "
+                          "transitions sont possibles (max --max-iterations).")
+    prn.add_argument("--max-iterations", type=int, default=10,
+                     help="Plafond d'itérations en mode --loop (défaut 10).")
     prn.set_defaults(func=cmd_run)
 
     pra = sub.add_parser("reactivate-ocr",

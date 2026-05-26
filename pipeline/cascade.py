@@ -123,7 +123,20 @@ def _save_and_validate(data: bytes, ref: Ref) -> tuple[str, dict]:
 
     Si OK : déplace vers dest_path, info contient pdf_path et sha256.
     Si KO : quarantaine, info contient quarantine_path et reason.
+
+    Si l'empreinte sha256 du fichier téléchargé est déjà dans
+    `ref.rejected_sha256` (PDF déjà rejeté à un précédent passage),
+    on skippe immédiatement sans re-quarantine — la source peut
+    re-livrer le même fichier qu'avant, on ne reboucle pas dessus.
     """
+    import hashlib
+    sha = hashlib.sha256(data).hexdigest()
+    rejected = ref.frontmatter.get("rejected_sha256") or []
+    if sha in rejected:
+        return "skipped_already_rejected", {
+            "reason": "sha256_already_in_rejected_list",
+            "sha256_prefix": sha[:12],
+        }
     if not _is_valid_pdf(data):
         return "failed", {"reason": "not_a_pdf"}
     tmp = Path(tempfile.mkstemp(suffix=".pdf", prefix="cascade_")[1])
@@ -131,15 +144,21 @@ def _save_and_validate(data: bytes, ref: Ref) -> tuple[str, dict]:
     is_ok, reason = _validate_page1(tmp, ref)
     if not is_ok:
         qpath = _quarantine(tmp, ref, reason)
-        return "page1_failed", {"reason": reason, "quarantine": str(qpath)}
+        # Mémoriser le sha rejeté pour éviter de re-télécharger le même
+        # fichier à un futur passage (la source peut re-livrer un autre
+        # PDF par contre).
+        rejected_list = ref.frontmatter.setdefault("rejected_sha256", [])
+        if sha not in rejected_list:
+            rejected_list.append(sha)
+        return "page1_failed", {"reason": reason, "quarantine": str(qpath),
+                                 "sha256_prefix": sha[:12]}
     dest = _make_dest_path(ref)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(tmp), str(dest))
-    import hashlib
-    sha = hashlib.sha256(dest.read_bytes()).hexdigest()
+    sha_final = hashlib.sha256(dest.read_bytes()).hexdigest()
     return "success", {
         "pdf_path": str(dest.relative_to(SOURCES)),
-        "pdf_sha256": sha,
+        "pdf_sha256": sha_final,
         "size_kb": dest.stat().st_size // 1024,
     }
 
@@ -586,10 +605,25 @@ CASCADE: list[tuple[str, Callable[[Ref], tuple[str, dict]]]] = _build_cascade()
 
 
 def already_tried(ref: Ref, source: str) -> bool:
-    """Vrai si la source a déjà un attempt loggé avec verdict ≠ no_source."""
+    """Vrai si la source a déjà un verdict définitif pour cette ref.
+
+    Verdicts définitifs (skip au prochain passage) :
+      - `success` : source a livré le bon PDF, plus la peine
+      - `failed`  : source a essayé et n'a rien (réseau, 404, etc.)
+      - `skipped_already_tried` : déjà skippée
+
+    Verdicts NON définitifs (la source peut re-tenter) :
+      - `no_source` : la source n'avait pas de DOI/UID compatible — peut
+        re-tenter si l'UID a changé
+      - `page1_failed` : la source a livré un mauvais PDF (homonymie), MAIS
+        elle peut avoir d'autres candidats. Le anti-doublon par sha256 dans
+        `_save_and_validate` évite de re-traiter le MÊME fichier.
+      - `skipped_breaker_open` : circuit-breaker temporaire de session
+      - `skipped_already_rejected` : sha256 déjà rejeté, skip instantané
+    """
     for a in ref.frontmatter.get("acquisition_attempts") or []:
-        if a.get("source") == source and a.get("verdict") not in (
-            "no_source", None, "skipped", ""
+        if a.get("source") == source and a.get("verdict") in (
+            "success", "failed", "skipped_already_tried"
         ):
             return True
     return False
