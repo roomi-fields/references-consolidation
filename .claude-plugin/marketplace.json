@@ -1,0 +1,26 @@
+{
+  "name": "roomi-fields",
+  "owner": {
+    "name": "Romain Peyrichou",
+    "email": "research@roomi-fields.com",
+    "url": "https://roomi-fields.com"
+  },
+  "description": "Marketplace for paper-trail and related research-workflow plugins.",
+  "plugins": [
+    {
+      "name": "paper-trail",
+      "source": "./.",
+      "description": "Anti-hallucination plugin for academic research: SOTA writer, citation receipts, PDF acquisition cascade with page-1 anti-homonymy validation, 19 registry invariants.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "homepage": "https://github.com/roomi-fields/paper-trail",
+      "keywords": [
+        "academic",
+        "research",
+        "anti-hallucination",
+        "sota",
+        "citation-verification"
+      ]
+    }
+  ]
+}
