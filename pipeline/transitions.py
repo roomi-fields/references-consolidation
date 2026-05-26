@@ -410,11 +410,18 @@ def pdf_acquired_dispatch(ref: Ref) -> TransitionResult:
                                 "scan_needs_ocr",
                                 meta={"detail": detail})
 
-    # corrupt / wrong_format / missing / too_small
+    # corrupt / wrong_format / missing / too_small / slow_extract
+    # → ajoute aussi sha au rejected_sha256 pour casser la boucle locale
+    current_sha = ref.frontmatter.get("pdf_sha256")
+    if current_sha:
+        rejected = ref.frontmatter.setdefault("rejected_sha256", [])
+        if current_sha not in rejected:
+            rejected.append(current_sha)
     flags = ref.frontmatter.setdefault("doctor_flags", [])
     flags.append(f"{category}:{detail}")
     append_state_history(ref, "needs_reacquisition", by="worker_b",
-                         meta={"probe": category, "detail": detail})
+                         meta={"probe": category, "detail": detail,
+                               "rejected_sha_added": bool(current_sha)})
     save_ref(ref)
     return TransitionResult(True, "pdf_acquired", "needs_reacquisition",
                             f"probe_{category}",
