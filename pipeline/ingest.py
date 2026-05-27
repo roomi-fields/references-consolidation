@@ -925,25 +925,47 @@ def _wikilink_for_slug(slug: str) -> str:
     return f"[[{target}|{alias}]]"
 
 
+_LIST_MARKER_RE = re.compile(r"^(\s*(?:[-*+]|\d+\.|\|\s*\d+\s*\|)\s+)")
+
+
+def _prefix_line_with_wikilink(line: str, wikilink: str) -> str:
+    """Insère `wikilink — ` en tête de ligne en préservant le marqueur de
+    liste s'il y en a un.
+    """
+    m = _LIST_MARKER_RE.match(line)
+    if m:
+        return f"{m.group(1)}{wikilink} — {line[m.end():]}"
+    # Pas de marqueur (paragraphe libre)
+    return f"{wikilink} — {line}"
+
+
+def _normalize_for_match(s: str) -> str:
+    """Normalise une chaîne pour comparaison fuzzy : retire markdown gras,
+    italique, ponctuation décorative.
+    """
+    s = re.sub(r"[*_`]+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _substitute_to_wikilink(
     sota_path: Path,
     citation: ParsedCitation,
     slug: str,
 ) -> bool:
-    """Remplace le texte brut de la citation par `[[target]] —` dans le SOTA.
+    """Substitue la citation dans le SOTA par un wikilink en tête de ligne.
 
-    La cible est le stem du PDF si la ref en a un (le wikilink ouvre alors
-    directement le PDF), sinon le slug registre (fallback).
+    Stratégie en cascade (H4) :
 
-    Préserve le format bibliographique humain :
+    1. **Match strict** : `raw` exactement présent → préfixe avec wikilink.
+    2. **Ancrage scoré** : pour chaque ligne candidate non-wikilinkée
+       contenant le lastname, on calcule un score (lastname=0.4, year=0.4,
+       premier mot du titre=0.2) augmenté de la similarité au `raw`. La
+       meilleure ligne au-dessus du seuil 0.55 est préfixée.
+    3. Sinon, échec → False.
 
-    Avant :
-      - Heydari et al., "BeatNet: ...", ISMIR 2021
-
-    Après :
-      - [[Heydari_2021_BeatNet_...]] — Heydari et al., "BeatNet: ...", ISMIR 2021
-
-    Idempotent : si la cible (PDF stem) est déjà devant le raw, ne fait rien.
+    Idempotence : si le slug apparaît déjà dans le texte d'une ligne
+    candidate, cette ligne est ignorée.
 
     Retourne True si une substitution a été faite.
     """
@@ -952,43 +974,71 @@ def _substitute_to_wikilink(
     except OSError:
         return False
     raw = citation.raw.strip()
-    if not raw:
-        return False
     wikilink = _wikilink_for_slug(slug)
-    # Le `raw` du sub-agent peut ne pas matcher mot-à-mot le texte du
-    # SOTA (par exemple sub-agent retourne "Valiant, L.G. 1975 *...*"
-    # alors que SOTA a "- **Valiant, L.G. 1975** *...*"). On essaie le
-    # match strict d'abord, puis un match permissif sur l'ancre auteur+année.
-    raw_to_use = raw
-    if raw not in text:
-        # Cherche une ancre courte "<Lastname>... <year>" dans le texte
-        # et substitue à la ligne contenant cette ancre.
-        lastname_raw = (
-            _extract_first_author_lastname(citation.author).capitalize()
-        )
-        year_str = citation.year or ""
-        if lastname_raw and year_str:
-            # Cherche la première ligne contenant lastname ET year proches.
-            for line in text.splitlines():
-                if (lastname_raw.lower() in line.lower()
-                        and year_str in line
-                        and "[[" not in line):
-                    raw_to_use = line.strip()
-                    break
-    if raw_to_use not in text:
+    raw_norm = _normalize_for_match(raw) if raw else ""
+
+    # Tier 1 : match strict (multi-occurrences + protection idempotente)
+    if raw and raw in text:
+        sentinel = f"___WIKILINKED___{slug}___WIKILINKED___"
+        already = f"{wikilink} — {raw}"
+        protected = text.replace(already, sentinel)
+        substituted = protected.replace(raw, f"{wikilink} — {raw}")
+        new_text = substituted.replace(sentinel, already)
+        if new_text != text:
+            sota_path.write_text(new_text, encoding="utf-8")
+            return True
+
+    # Tier 2 : ancrage scoré ligne par ligne
+    lastname = _extract_first_author_lastname(citation.author)
+    if not lastname or lastname == "unknown":
         return False
-    # Substitution multi-occurrences : on remplace TOUTES les occurrences
-    # du `raw` exact dans le SOTA. Idempotence : on protège les occurrences
-    # déjà préfixées par le wikilink en les marquant temporairement.
-    sentinel = f"___WIKILINKED___{slug}___WIKILINKED___"
-    # 1) Marque les occurrences déjà wikilinkées pour qu'elles ne soient
-    #    pas re-substituées.
-    already = f"{wikilink} — {raw_to_use}"
-    protected = text.replace(already, sentinel)
-    # 2) Substitue toutes les occurrences restantes du raw nu.
-    substituted = protected.replace(raw_to_use, f"{wikilink} — {raw_to_use}")
-    # 3) Restaure le sentinel.
-    new_text = substituted.replace(sentinel, already)
+    lastname_lc = lastname.lower()
+    year_str = re.sub(r"[^0-9]", "", citation.year or "")[:4]
+    title_word = _title_first_significant_word(citation.title or "")
+    title_word_lc = title_word.lower() if title_word and title_word != "untitled" else ""
+
+    def _alphanum(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    lastname_anorm = _alphanum(lastname_lc)  # tolère le tiret dans la ligne
+
+    best_line: Optional[str] = None
+    best_score = 0.0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if len(stripped) < 6:
+            continue
+        if slug in line:
+            continue  # déjà ce wikilink sur cette ligne
+        line_lc = line.lower()
+        line_anorm = _alphanum(line_lc)
+        # Required minimum : lastname doit apparaître (normalisé alphanum
+        # pour matcher "Vijay-Shanker" ↔ "vijayshanker")
+        if lastname_anorm and lastname_anorm not in line_anorm:
+            continue
+        score = 0.4  # lastname matché
+        if year_str and year_str in line:
+            score += 0.4
+        if title_word_lc and title_word_lc in line_lc:
+            score += 0.2
+        # Bonus similarité avec le raw normalisé
+        if raw_norm:
+            line_norm = _normalize_for_match(line)
+            sim = SequenceMatcher(None, line_norm[:200], raw_norm[:200]).ratio()
+            score += sim * 0.3
+        if score > best_score:
+            best_score = score
+            best_line = line
+
+    # Seuil : 0.55 sans year OU 0.7 avec year (réduit faux positifs)
+    threshold = 0.55 if not year_str else 0.7
+    if best_line is None or best_score < threshold:
+        return False
+
+    new_line = _prefix_line_with_wikilink(best_line, wikilink)
+    if new_line == best_line:
+        return False
+    new_text = text.replace(best_line, new_line, 1)
     if new_text == text:
         return False
     sota_path.write_text(new_text, encoding="utf-8")
