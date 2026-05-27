@@ -108,24 +108,25 @@ def _ensure_git_backup(vault_root: Path, message: str) -> bool:
         print(f"      Pour initialiser : `pipeline ingest --init-git`",
               flush=True)
         return False
-    # Commit les changements en cours avant la modification INGEST
+    # Commit les changements en cours avant la modification INGEST.
+    # Timeout généreux : git add . peut prendre plusieurs minutes sur
+    # un gros vault Obsidian la 1ère fois.
     try:
         subprocess.run(
             ["git", "-C", str(vault_root), "add", "."],
-            check=True, capture_output=True, timeout=30,
+            check=True, capture_output=True, timeout=600,
         )
-        # Si rien à commit, ce n'est pas une erreur
         result = subprocess.run(
             ["git", "-C", str(vault_root), "commit", "-m", message,
              "--allow-empty"],
-            capture_output=True, timeout=30, text=True,
+            capture_output=True, timeout=120, text=True,
         )
         if result.returncode != 0:
             print(f"[WARN] git commit a échoué : {result.stderr[:200]}",
                   flush=True)
             return False
     except subprocess.TimeoutExpired:
-        print("[ERR] git commit timeout", flush=True)
+        print("[ERR] git commit timeout (10 min dépassées)", flush=True)
         return False
     except FileNotFoundError:
         print("[ERR] git n'est pas installé sur ce système", flush=True)
@@ -153,12 +154,14 @@ def init_git_vault(vault_root: Path) -> bool:
     try:
         subprocess.run(["git", "-C", str(vault_root), "init"],
                        check=True, capture_output=True, timeout=30)
+        # Sur un gros vault Obsidian, `git add .` peut prendre plusieurs
+        # minutes la 1ère fois (10 000+ fichiers à indexer).
         subprocess.run(["git", "-C", str(vault_root), "add", "."],
-                       check=True, capture_output=True, timeout=30)
+                       check=True, capture_output=True, timeout=600)
         subprocess.run(
             ["git", "-C", str(vault_root), "commit", "-m",
              "Initial vault state before paper-trail INGEST"],
-            check=True, capture_output=True, timeout=30,
+            check=True, capture_output=True, timeout=120,
         )
     except subprocess.CalledProcessError as e:
         print(f"[ERR] git init/commit failed : {e.stderr[:200] if e.stderr else e}",
@@ -179,6 +182,9 @@ _SLUG_TITLE_STOPWORDS = {
 }
 
 
+_AUTHOR_NOISE_WORDS = {"et", "al", "al.", "and", "&", "etc", "et al"}
+
+
 def _extract_first_author_lastname(author_text: str) -> str:
     """Extrait le nom de famille du premier auteur.
 
@@ -186,18 +192,26 @@ def _extract_first_author_lastname(author_text: str) -> str:
       - "Heydari, M. & Mahadevan, M." → "heydari"
       - "Heydari M., Mahadevan M." → "heydari"
       - "M. Heydari & M. Mahadevan" → "heydari"
+      - "Heydari et al." → "heydari"
       - "Heydari" → "heydari"
     """
     if not author_text:
         return "unknown"
+    # Tronque à "et al" et variantes pour ne pas inclure le bruit
+    text = re.sub(r"\bet\s+al\.?", "", author_text, flags=re.IGNORECASE)
     # Coupe au premier séparateur multi-auteurs
-    first = re.split(r"\s*(?:&|;|\band\b|,\s+[A-Z])", author_text, maxsplit=1)[0]
+    first = re.split(r"\s*(?:&|;|\band\b|,\s+[A-Z])", text, maxsplit=1)[0]
     # Si "Lastname, F." → "Lastname"
     if "," in first:
         last = first.split(",")[0].strip()
     else:
-        # "F. Lastname" ou "First Lastname" → dernier mot non-initiale
-        words = [w for w in first.split() if not re.fullmatch(r"[A-Z]\.+", w)]
+        # "F. Lastname" ou "First Lastname" → dernier mot non-initiale et
+        # non-bruit
+        words = [
+            w for w in first.split()
+            if not re.fullmatch(r"[A-Z]\.+", w)
+            and _to_ascii_lower(w).rstrip(".") not in _AUTHOR_NOISE_WORDS
+        ]
         last = words[-1] if words else first.strip()
     # Normalisation : lower, ascii, alphanum
     last = _to_ascii_lower(last)
