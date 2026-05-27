@@ -13,7 +13,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .base import Adapter
+from .base import Adapter, BibliographySection
+# Réutilise l'implémentation Obsidian pour l'extraction des sections
+# bibliographiques (même format markdown).
+from .obsidian import ObsidianAdapter
 
 
 # Match :
@@ -57,3 +60,12 @@ class FlatAdapter(Adapter):
     def format_citation(self, slug: str) -> str:
         """Markdown link standard vers `refs/<slug>.md`."""
         return f"[{slug}](refs/{slug}.md)"
+
+    def extract_bibliography_sections(
+        self, sota_path: Path
+    ) -> list[BibliographySection]:
+        """Délègue à ObsidianAdapter — les en-têtes markdown sont
+        identiques entre layouts flat et obsidian."""
+        return ObsidianAdapter(self.vault_root).extract_bibliography_sections(
+            sota_path
+        )

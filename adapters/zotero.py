@@ -10,7 +10,7 @@ dans Zotero plutôt qu'un vault markdown.
 from __future__ import annotations
 from pathlib import Path
 
-from .base import Adapter
+from .base import Adapter, BibliographySection
 
 
 class ZoteroAdapter(Adapter):
@@ -43,3 +43,9 @@ class ZoteroAdapter(Adapter):
     def format_citation(self, slug: str) -> str:
         self._raise()
         return ""  # unreachable
+
+    def extract_bibliography_sections(
+        self, sota_path: Path
+    ) -> list[BibliographySection]:
+        self._raise()
+        return []  # unreachable

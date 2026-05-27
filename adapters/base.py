@@ -10,7 +10,29 @@ Default : obsidian.
 """
 from __future__ import annotations
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass
+class BibliographySection:
+    """Bloc de texte candidat pour ingestion par INGEST.
+
+    Représente une section d'un SOTA qui contient des citations à
+    extraire — typiquement `## Références`, `## Bibliographie`, ou une
+    liste bibliographique. Le contenu brut (`raw_text`) est destiné à
+    être parsé par le sub-agent `citation-parser`.
+
+    Le champ `is_excluded` est `True` si l'en-tête correspond à une
+    section volontairement écartée (« Écartées », « Hallucinées »,
+    « Retracted ») — INGEST ne parse pas ces sections.
+    """
+    sota_path: Path
+    header: str           # texte complet du header markdown ("## Références Clés")
+    start_offset: int     # offset dans le fichier (en caractères) où démarre la section
+    end_offset: int       # offset de fin (exclusif)
+    raw_text: str         # contenu de la section (sans le header)
+    is_excluded: bool     # True = à skipper (refs volontairement écartées)
 
 
 class Adapter(ABC):
@@ -65,5 +87,25 @@ class Adapter(ABC):
         """Format de citation textuelle pour ce slug dans cet adapter.
 
         Ex: `[[slug]]` pour Obsidian, `[slug](refs/slug.md)` pour flat.
+        """
+        ...
+
+    @abstractmethod
+    def extract_bibliography_sections(
+        self, sota_path: Path
+    ) -> list[BibliographySection]:
+        """Extrait les sections candidates pour ingestion d'un SOTA.
+
+        Cible : sections dont le titre matche un pattern bibliographique
+        (« Références », « Bibliographie », « Sources », « Literature »,
+        etc.), niveau h2-h4.
+
+        Marque comme `is_excluded` les sections « Écartées »,
+        « Rejetées », « Hallucinées », « Retracted », « Non utilisées »
+        (case-insensitive). INGEST les retournera pour traçabilité
+        mais ne les parsera pas.
+
+        Le contenu brut (`raw_text`) est destiné au sub-agent
+        `citation-parser` qui retournera des citations structurées.
         """
         ...
