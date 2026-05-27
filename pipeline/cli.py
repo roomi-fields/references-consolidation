@@ -335,6 +335,175 @@ def cmd_arbitrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resolve_textbooks(args: argparse.Namespace) -> int:
+    """Pour les refs textbooks ingérées sans year/title (slugs
+    `_0000_untitled` ou `_untitled`), liste les candidates ou applique
+    des décisions JSON (fusion, complétion, blocked).
+
+    Modes :
+      - `--list` : JSON sur stdout des refs à résoudre, avec siblings
+        (refs même lastname) pour aider à la fusion
+      - `--apply-from <decisions.json>` : applique les décisions
+
+    Format decisions.json :
+      [
+        {"slug": "hopcroft_0000_untitled", "action": "merge_into",
+         "target_slug": "hopcroft_2001_introduction"},
+        {"slug": "sipser_0000_untitled", "action": "complete",
+         "year": "2012", "title": "Introduction to the Theory of Computation"},
+        {"slug": "wolper_0000_untitled", "action": "blocked",
+         "reason": "textbook_unidentified"}
+      ]
+    """
+    from .registry import load_ref, save_ref, append_state_history
+    from pathlib import Path
+    from collections import defaultdict
+    from datetime import datetime, timezone
+
+    if getattr(args, "list_candidates", False):
+        candidates = []
+        by_lastname = defaultdict(list)
+        for ref in iter_refs():
+            fm = ref.frontmatter
+            year = str(fm.get("year") or "")
+            title = fm.get("title") or ""
+            slug = ref.slug
+            is_candidate = (
+                slug.endswith("_untitled")
+                or year in ("", "0000", "nd", "None")
+                or not title
+            )
+            if is_candidate and fm.get("state") in (
+                "candidate", "page1_validated", "uid_resolved"
+            ):
+                candidates.append({
+                    "slug": slug,
+                    "author": fm.get("author") or "",
+                    "year": year,
+                    "title": title,
+                    "state": fm.get("state"),
+                    "ingest_source": fm.get("ingest_source") or "",
+                    "pdf_path": fm.get("pdf_path") or "",
+                })
+            lname = slug.split("_")[0]
+            by_lastname[lname].append({
+                "slug": slug,
+                "year": year,
+                "title": title[:80],
+                "state": fm.get("state"),
+                "has_pdf": bool(fm.get("pdf_path")),
+            })
+        for cand in candidates:
+            lname = cand["slug"].split("_")[0]
+            cand["siblings"] = [
+                s for s in by_lastname.get(lname, [])
+                if s["slug"] != cand["slug"]
+            ]
+        print(json.dumps(candidates, ensure_ascii=False, indent=2))
+        return 0
+
+    apply_from = getattr(args, "apply_from", None)
+    if not apply_from:
+        print("[ERR] Mode inconnu. Utilise --list ou --apply-from <path.json>",
+              file=sys.stderr)
+        return 2
+
+    json_path = Path(apply_from)
+    if not json_path.exists():
+        print(f"[ERR] decisions JSON introuvable : {json_path}",
+              file=sys.stderr)
+        return 2
+    decisions = json.loads(json_path.read_text(encoding="utf-8"))
+    if not isinstance(decisions, list):
+        print("[ERR] decisions.json doit être une liste", file=sys.stderr)
+        return 2
+
+    n_merged = n_completed = n_blocked = n_err = 0
+    for d in decisions:
+        slug = d.get("slug")
+        action = d.get("action")
+        if not slug or not action:
+            n_err += 1
+            continue
+        ref_path = REFS / f"{slug}.md"
+        if not ref_path.exists():
+            print(f"[skip] {slug} introuvable", file=sys.stderr)
+            n_err += 1
+            continue
+        ref = load_ref(ref_path)
+        if action == "merge_into":
+            target = d.get("target_slug")
+            if not target or not (REFS / f"{target}.md").exists():
+                print(f"[ERR] target {target} introuvable pour {slug}",
+                      file=sys.stderr)
+                n_err += 1
+                continue
+            target_ref = load_ref(REFS / f"{target}.md")
+            # Transfert pdf_path éventuel
+            if (ref.frontmatter.get("pdf_path")
+                    and not target_ref.frontmatter.get("pdf_path")):
+                target_ref.frontmatter["pdf_path"] = ref.frontmatter["pdf_path"]
+                if ref.frontmatter.get("pdf_sha256"):
+                    target_ref.frontmatter["pdf_sha256"] = ref.frontmatter["pdf_sha256"]
+                save_ref(target_ref)
+            # Marque la ref source comme fusionnée (retracted)
+            append_state_history(ref, "retracted", by="resolve_textbooks",
+                                 meta={"merged_into": target,
+                                       "reason": "duplicate_textbook"})
+            ref.frontmatter["retracted_reason"] = f"merged_into:{target}"
+            ref.frontmatter["retracted_at"] = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            save_ref(ref)
+            append_event(slug, "candidate", "retracted",
+                         "resolve_textbooks:merge", {"merged_into": target})
+            n_merged += 1
+            print(f"[merge] {slug} → {target}")
+        elif action == "complete":
+            year = d.get("year")
+            title = d.get("title")
+            venue = d.get("venue")
+            if year:
+                ref.frontmatter["year"] = str(year)
+            if title:
+                ref.frontmatter["title"] = title
+            if venue:
+                ref.frontmatter["venue"] = venue
+            from .ingest import _make_slug
+            new_slug = _make_slug(
+                ref.frontmatter.get("author") or "",
+                str(ref.frontmatter.get("year") or ""),
+                ref.frontmatter.get("title") or "",
+            )
+            i = 2
+            while (REFS / f"{new_slug}.md").exists() and new_slug != slug:
+                new_slug = f"{new_slug}_{i}"
+                i += 1
+            ref.frontmatter["slug"] = new_slug
+            save_ref(ref)
+            if new_slug != slug:
+                (REFS / f"{slug}.md").rename(REFS / f"{new_slug}.md")
+            n_completed += 1
+            t_short = (title or "")[:40]
+            print(f"[complete] {slug} → {new_slug} (year={year}, title={t_short})")
+        elif action == "blocked":
+            reason = d.get("reason") or "textbook_unidentified"
+            append_state_history(ref, "blocked_human:textbook_unidentified",
+                                 by="resolve_textbooks",
+                                 meta={"reason": reason})
+            ref.frontmatter["blocked_reason"] = reason
+            save_ref(ref)
+            n_blocked += 1
+            print(f"[blocked] {slug}  reason={reason}")
+        else:
+            print(f"[ERR] action inconnue : {action!r} pour {slug}",
+                  file=sys.stderr)
+            n_err += 1
+
+    print(f"\nResolved: merged={n_merged}  completed={n_completed}  "
+          f"blocked={n_blocked}  errors={n_err}")
+    return 1 if n_err else 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     """Recherche dans le registre validé (`page1_validated` ou
     `sota_cited_confirmed` selon `--include-pending`).
@@ -727,6 +896,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Re-évalue les awaiting_rtfm_ocr via rtfm check")
     pra.add_argument("--quiet", action="store_true")
     pra.set_defaults(func=cmd_reactivate_ocr)
+
+    prt = sub.add_parser("resolve-textbooks",
+                         help="Résout les refs textbook ingérées sans year/title")
+    prt.add_argument("--list", dest="list_candidates", action="store_true",
+                     help="Liste sur stdout les refs candidates en JSON")
+    prt.add_argument("--apply-from", dest="apply_from",
+                     help="Path d'un JSON de décisions à appliquer")
+    prt.set_defaults(func=cmd_resolve_textbooks)
 
     psr = sub.add_parser("search",
                          help="Recherche dans le registre validé")

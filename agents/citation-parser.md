@@ -103,17 +103,36 @@ Field semantics :
    matches one in `skip_sections` (case-insensitive), skip ALL its
    content. Otherwise parse normally.
 
-3. **Textbook detection** : even short refs like "Hopcroft FR + EN",
-   "Sipser FR (Ch. 1)", "Carton FR" ARE valid citations. They refer
-   to real textbooks. Try to extract :
-   - `author` : last name (e.g., "Hopcroft", "Sipser", "Carton")
-   - `year` : if present, else `null`
-   - `title` : if mentioned, else `null` or a placeholder like
-     "Introduction to Automata Theory" (Hopcroft) if context makes
-     it obvious. If not obvious, set `confidence: medium` and leave
-     title empty.
-   For textbooks without year, set `year: null` and `confidence: low`
-   — the orchestrator will flag for human resolution.
+3. **Textbook detection with contextual inference** : even short refs
+   like "Hopcroft FR + EN", "Sipser FR (Ch. 1)", "Carton FR" ARE
+   valid citations to real textbooks. Use the ENTIRE document to
+   infer missing fields :
+
+   - **Look elsewhere in the document** for a full citation of the
+     same author. If "Hopcroft, Motwani, Ullman 2001/2006, Introduction
+     to Automata Theory" appears somewhere, then "Hopcroft FR + EN"
+     and "Hopcroft (CYK Theorem §7)" refer to the same book — use
+     `year: 2001`, `title: Introduction to Automata Theory`,
+     `confidence: high`. The short reference is just a re-citation
+     of the same source.
+
+   - **Use known textbook knowledge** :
+     - "Sipser" → "Introduction to the Theory of Computation"
+     - "Carton" → "Langages formels, calculabilité et complexité"
+     - "Hopcroft Ullman" → "Introduction to Automata Theory, Languages,
+       and Computation"
+     - "Wolper" → "Introduction à la calculabilité"
+     - "Aho Sethi Ullman" → "Compilers: Principles, Techniques, and
+       Tools" (the "dragon book")
+     If you're 80%+ confident in the canonical reference, set
+     `confidence: high` and provide title.
+
+   - **Last resort**: if absolutely no year/title can be inferred,
+     set `year: null` and `title: null` and `confidence: low` — a
+     later resolve-textbook pass will handle these.
+
+   - **Same source mentioned multiple times** : return ONE record with
+     `raw` = the most complete mention found in the document.
 
 4. **Confidence levels** :
    - `high` : full citation with author, year, title, optionally DOI

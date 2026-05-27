@@ -606,13 +606,18 @@ def _substitute_to_wikilink(
     if not raw:
         return False
     wikilink = _wikilink_for_slug(slug)
-    # Idempotence : si le wikilink complet (target|alias) est déjà juste
-    # avant le raw, on ne re-substitue pas.
-    if wikilink in text:
-        idx = text.find(wikilink)
-        if idx >= 0 and raw in text[idx:idx + len(wikilink) + len(raw) + 10]:
-            return False
-    new_text = text.replace(raw, f"{wikilink} — {raw}", 1)
+    # Substitution multi-occurrences : on remplace TOUTES les occurrences
+    # du `raw` exact dans le SOTA. Idempotence : on protège les occurrences
+    # déjà préfixées par le wikilink en les marquant temporairement.
+    sentinel = f" WIKILINKED {slug} "
+    # 1) Marque les occurrences déjà wikilinkées pour qu'elles ne soient
+    #    pas re-substituées.
+    already = f"{wikilink} — {raw}"
+    protected = text.replace(already, sentinel)
+    # 2) Substitue toutes les occurrences restantes du raw nu.
+    substituted = protected.replace(raw, f"{wikilink} — {raw}")
+    # 3) Restaure le sentinel.
+    new_text = substituted.replace(sentinel, already)
     if new_text == text:
         return False
     sota_path.write_text(new_text, encoding="utf-8")
