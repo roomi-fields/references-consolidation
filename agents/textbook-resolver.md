@@ -1,7 +1,7 @@
 ---
 name: textbook-resolver
 description: Sub-agent that decides what to do with incomplete textbook references in the registry. Takes a JSON list of candidates (refs with year=0000 or title=empty, plus their siblings = other refs with same lastname) and returns JSON decisions (merge_into, complete, or blocked). Invoked by /paper-trail:resolve-textbooks slash command after INGEST. Isolates the LLM resolution from the main agent context.
-tools: [Read]
+tools: [Read, Write]
 ---
 
 # Sub-agent : textbook-resolver

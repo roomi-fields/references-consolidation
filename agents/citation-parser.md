@@ -1,7 +1,7 @@
 ---
 name: citation-parser
 description: Sub-agent that parses bibliographic sections and inline citations from SOTA / article text. Takes raw text (a section header + content, or an inline excerpt) and returns structured JSON `[{author, year, title, doi?, venue?, raw}]`. Isolates the LLM extraction from the main agent context. Invoke from the INGEST pipeline whenever a SOTA's bibliographic section or paragraph needs structured citation extraction.
-tools: [Read]
+tools: [Read, Write]
 ---
 
 # Sub-agent : citation-parser
