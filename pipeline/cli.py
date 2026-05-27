@@ -285,6 +285,44 @@ def cmd_arbitrate(args: argparse.Namespace) -> int:
                              meta={"reason": reason, "via": "unblock"})
         ref.frontmatter.pop("blocked_by", None)
         ref.frontmatter.pop("blocked_reason", None)
+    elif decision == "reject-pdf":
+        # L'utilisateur a identifié que le PDF acquis n'est pas la bonne
+        # source (TOC au lieu du paper, mauvaise version, etc.). On :
+        # 1. Ajoute le sha actuel à rejected_sha256 (anti-rebouclage)
+        # 2. Bouge le PDF en quarantaine
+        # 3. Repasse en needs_reacquisition pour relancer la cascade
+        current_sha = ref.frontmatter.get("pdf_sha256")
+        current_pdf = ref.frontmatter.get("pdf_path")
+        if current_sha:
+            rejected = ref.frontmatter.setdefault("rejected_sha256", [])
+            if current_sha not in rejected:
+                rejected.append(current_sha)
+        # Quarantine le PDF (déplace hors du dossier Sources)
+        quarantined = False
+        if current_pdf:
+            from .config import SOURCES
+            from .cascade import QUARANTINE
+            import shutil
+            src = SOURCES / current_pdf
+            if src.exists():
+                QUARANTINE.mkdir(parents=True, exist_ok=True)
+                qpath = QUARANTINE / f"{slug}_human_rejected_{src.name}"
+                try:
+                    shutil.move(str(src), str(qpath))
+                    quarantined = True
+                except OSError as e:
+                    print(f"[WARN] quarantine échouée : {e}", file=sys.stderr)
+        # Reset des champs PDF + state
+        ref.frontmatter.pop("pdf_path", None)
+        ref.frontmatter.pop("pdf_sha256", None)
+        flags = ref.frontmatter.setdefault("doctor_flags", [])
+        flags.append(f"human_rejected_pdf:{reason}")
+        append_state_history(ref, "needs_reacquisition",
+                             by="human_arbitration",
+                             meta={"reason": reason,
+                                   "via": "reject_pdf",
+                                   "quarantined": quarantined,
+                                   "rejected_sha_added": bool(current_sha)})
     else:
         print(f"[ERR] décision inconnue : {decision}", file=sys.stderr)
         return 2
@@ -726,10 +764,13 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Décision humaine sur une ref problématique")
     par.add_argument("slug", help="Slug de la ref à arbitrer")
     par.add_argument("--decision", required=True,
-                     choices=("retract", "blocked", "investigate", "unblock"),
+                     choices=("retract", "blocked", "investigate",
+                              "unblock", "reject-pdf"),
                      help="retract: artefact; blocked: paywall/inaccessible; "
                           "investigate: corriger frontmatter puis relancer; "
-                          "unblock: lever blocked_by et retenter cascade")
+                          "unblock: lever blocked_by et retenter cascade; "
+                          "reject-pdf: mauvaise source identifiée (TOC, "
+                          "mauvaise version) — quarantine + relance cascade")
     par.add_argument("--reason", default="",
                      help="Phrase courte justifiant la décision (loggée)")
     par.set_defaults(func=cmd_arbitrate)
