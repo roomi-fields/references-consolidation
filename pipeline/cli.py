@@ -297,6 +297,51 @@ def cmd_arbitrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    """Recherche dans le registre validé (`page1_validated` ou
+    `sota_cited_confirmed` selon `--include-pending`).
+
+    Filtre par match insensible à la casse sur auteur + titre + year.
+    Sortie : liste compacte avec slug, auteur, année, titre, état.
+    """
+    query = (args.query or "").strip().lower()
+    if not query:
+        print("[ERR] Query vide. Usage : pipeline search <terme>",
+              file=sys.stderr)
+        return 2
+
+    include_pending = bool(getattr(args, "include_pending", False))
+    valid_states = {"sota_cited_confirmed"}
+    if include_pending:
+        valid_states.add("page1_validated")
+
+    matches = []
+    for ref in iter_refs():
+        if ref.state not in valid_states:
+            continue
+        fm = ref.frontmatter
+        haystack = " ".join(str(fm.get(k) or "") for k in
+                            ("author", "title", "year"))
+        haystack += " " + ref.slug
+        if query in haystack.lower():
+            matches.append(ref)
+
+    limit = getattr(args, "limit", 0) or 50
+    matches = matches[:limit]
+    if not matches:
+        print(f"Aucune ref ne matche {query!r} parmi les refs validées.")
+        return 0
+    print(f"{len(matches)} refs validées match {query!r} :\n")
+    for ref in matches:
+        fm = ref.frontmatter
+        author = (fm.get("author") or "?")[:25]
+        year = fm.get("year") or "?"
+        title = (fm.get("title") or "")[:60]
+        print(f"  [{ref.state:<25}] {author:<25} ({year}) — {title}")
+        print(f"     {ref.slug}")
+    return 0
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     """Ingest les citations d'un SOTA (ou de tous les SOTAs) dans le registre.
 
@@ -644,6 +689,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Re-évalue les awaiting_rtfm_ocr via rtfm check")
     pra.add_argument("--quiet", action="store_true")
     pra.set_defaults(func=cmd_reactivate_ocr)
+
+    psr = sub.add_parser("search",
+                         help="Recherche dans le registre validé")
+    psr.add_argument("query", help="Terme à chercher (auteur, titre, année, slug)")
+    psr.add_argument("--include-pending", action="store_true",
+                     help="Inclure aussi les refs page1_validated (pas seulement sota_cited_confirmed)")
+    psr.add_argument("--limit", type=int, default=50, help="Nb max de résultats")
+    psr.set_defaults(func=cmd_search)
 
     pin = sub.add_parser("ingest",
                          help="Ingest citations d'un SOTA dans le registre")
