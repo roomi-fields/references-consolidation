@@ -272,6 +272,19 @@ def cmd_arbitrate(args: argparse.Namespace) -> int:
         flags.append(f"human_investigate:{reason}")
         ref.frontmatter.pop("blocked_by", None)
         # Pas de mutation de state. La transition normale reprendra.
+    elif decision == "unblock":
+        # Repasse la ref en uid_resolved pour relancer la cascade.
+        # Utile quand une nouvelle source est dispo OU si l'utilisateur
+        # veut retenter après correction frontmatter / réseau / proxy.
+        if from_state not in ("candidate", "uid_resolved",
+                              "needs_reacquisition"):
+            target_state = "uid_resolved"
+        else:
+            target_state = from_state
+        append_state_history(ref, target_state, by="human_arbitration",
+                             meta={"reason": reason, "via": "unblock"})
+        ref.frontmatter.pop("blocked_by", None)
+        ref.frontmatter.pop("blocked_reason", None)
     else:
         print(f"[ERR] décision inconnue : {decision}", file=sys.stderr)
         return 2
@@ -533,9 +546,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Décision humaine sur une ref problématique")
     par.add_argument("slug", help="Slug de la ref à arbitrer")
     par.add_argument("--decision", required=True,
-                     choices=("retract", "blocked", "investigate"),
+                     choices=("retract", "blocked", "investigate", "unblock"),
                      help="retract: artefact; blocked: paywall/inaccessible; "
-                          "investigate: corriger frontmatter puis relancer")
+                          "investigate: corriger frontmatter puis relancer; "
+                          "unblock: lever blocked_by et retenter cascade")
     par.add_argument("--reason", default="",
                      help="Phrase courte justifiant la décision (loggée)")
     par.set_defaults(func=cmd_arbitrate)
