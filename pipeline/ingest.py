@@ -306,6 +306,75 @@ def _normalize_title(title: str) -> str:
     return t
 
 
+# Cache du registre chargé (pour éviter iter_refs() × N sessions)
+_REGISTRY_CACHE: Optional[list] = None
+
+
+def _get_registry_cached() -> list:
+    """Charge toutes les refs une seule fois pour la session."""
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        _REGISTRY_CACHE = list(iter_refs())
+    return _REGISTRY_CACHE
+
+
+def _rtfm_prefilter_registry_slugs(
+    citation: ParsedCitation, limit: int = 10
+) -> list[str]:
+    """RTFM-first : utilise `rtfm search` pour pré-filtrer les refs registre
+    candidates, au lieu d'itérer sur les 900+ refs.
+
+    Retourne la liste des slugs des refs registre matchant la query
+    (auteur + année + premier mot du titre).
+
+    Fallback : si RTFM indisponible ou erreur, retourne [] (l'appelant
+    fait alors fallback sur le scan complet).
+    """
+    from .config import RTFM_DB
+    parts = []
+    lastname = _extract_first_author_lastname(citation.author)
+    if lastname and lastname != "unknown":
+        parts.append(lastname)
+    if citation.year:
+        parts.append(str(citation.year))
+    if citation.title:
+        first_word = _title_first_significant_word(citation.title)
+        if first_word and first_word != "untitled":
+            parts.append(first_word)
+    if not parts:
+        return []
+    query = " ".join(parts)
+
+    try:
+        proc = subprocess.run(
+            ["rtfm", "search", query, "--db", str(RTFM_DB),
+             "--limit", str(limit * 3), "-f", "json"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if proc.returncode != 0:
+            return []
+        data = json.loads(proc.stdout)
+        results = data.get("results") or []
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError,
+            json.JSONDecodeError):
+        return []
+
+    # Filtre les hits dans _registry/refs/ et extrait le slug
+    slugs: list[str] = []
+    seen = set()
+    for r in results:
+        f = r.get("file") or r.get("path") or ""
+        if "_registry/refs/" not in f:
+            continue
+        slug = Path(f).stem
+        if slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
+        if len(slugs) >= limit:
+            break
+    return slugs
+
+
 def _reconcile_with_registry(
     citation: ParsedCitation,
     doi: Optional[str],
@@ -313,27 +382,39 @@ def _reconcile_with_registry(
 ) -> Optional[str]:
     """Cherche dans le registre une ref qui correspond à cette citation.
 
-    Algorithme :
-    1. DOI strict : si doi présent, scan registre pour `uid: doi:<X>`
-    2. Fuzzy : auteur exact (lastname) + année exacte + Levenshtein
-       titre ≥ `title_threshold`
-
-    Retourne le slug d'une ref existante, ou None.
+    Stratégie RTFM-first :
+    1. DOI strict d'abord (sur les refs en cache)
+    2. RTFM `rtfm search` pour pré-filtrer 10 candidats max
+       → fuzzy match sur ces 10 (auteur+année+titre Levenshtein)
+    3. Si RTFM rien ne donne, fallback fuzzy sur tout le registre
     """
     cite_lastname = _extract_first_author_lastname(citation.author)
     cite_year = re.sub(r"[^0-9]", "", citation.year or "")[:4]
     cite_title_norm = _normalize_title(citation.title)
 
-    for ref in iter_refs():
-        fm = ref.frontmatter
-        # 1. DOI strict (uid peut être None explicite dans le YAML, pas
-        # seulement absent — `or ""` couvre les deux cas)
-        ref_uid = fm.get("uid") or ""
-        if doi and ref_uid.startswith("doi:"):
-            ref_doi = ref_uid[4:].strip().lower()
-            if ref_doi == doi.lower():
+    refs_cache = _get_registry_cached()
+    # Index slug → ref pour lookup rapide
+    by_slug = {r.slug: r for r in refs_cache}
+
+    # 1. DOI strict (rapide même sur 900 refs)
+    if doi:
+        doi_lower = doi.lower()
+        for ref in refs_cache:
+            ref_uid = ref.frontmatter.get("uid") or ""
+            if ref_uid.startswith("doi:") and ref_uid[4:].strip().lower() == doi_lower:
                 return ref.slug
-        # 2. Fuzzy : auteur + année + titre
+
+    # 2. RTFM-first pré-filtrage
+    candidate_slugs = _rtfm_prefilter_registry_slugs(citation, limit=10)
+    refs_to_check = [by_slug[s] for s in candidate_slugs if s in by_slug]
+
+    # 3. Fallback : tout le registre si RTFM rien
+    if not refs_to_check:
+        refs_to_check = refs_cache
+
+    # Fuzzy match : auteur exact + année exacte + Levenshtein titre
+    for ref in refs_to_check:
+        fm = ref.frontmatter
         ref_author = fm.get("author") or ""
         ref_year = re.sub(r"[^0-9]", "", str(fm.get("year") or ""))[:4]
         if not ref_author or not ref_year:
@@ -384,44 +465,132 @@ Raw citation text from SOTA :
 """
 
 
+# Cache module-level pour éviter le rglob() par citation.
+# Sur WSL+mount Windows, ~600 PDFs × 29 citations = ~2 min sans cache,
+# 1 scan unique au démarrage + lookups dict = ~3 s avec cache.
+_PDF_INDEX_CACHE: Optional[dict[str, list[Path]]] = None
+_PDF_USED_CACHE: Optional[set[str]] = None
+
+
+def _build_pdf_index() -> dict[str, list[Path]]:
+    """1 seul scan PDFs vault ; clé = '<lastname>_<year>' lowercase.
+
+    Hiérarchie de sources (rapide → fallback) :
+    1. `rtfm files "*.pdf"` — utilise l'index RTFM existant si dispo
+       (~3s pour 1500 PDFs, retourne les paths relatifs).
+    2. `subprocess find` — Linux find (~1s, mais ne traite que ce qui
+       est sur disque, pas filtré par état RTFM).
+    3. `Path.rglob` Python — fallback ultime (~4 min sur WSL+mount).
+    """
+    from .config import SOURCES, VAULT, RTFM_DB
+    index: dict[str, list[Path]] = {}
+    if not SOURCES.exists():
+        return index
+    key_re = re.compile(r"^([a-z][a-z0-9]*)_((?:19|20)\d{2})", re.IGNORECASE)
+
+    # 1) RTFM-first
+    try:
+        proc = subprocess.run(
+            ["rtfm", "files", "--db", str(RTFM_DB), "*.pdf"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if proc.returncode == 0:
+            # Format : "  [corpus] relative_path  (N bytes)"
+            line_re = re.compile(r"^\s*\[[^\]]+\]\s+(.+?)\s+\(\d+\s+bytes\)\s*$")
+            for line in proc.stdout.splitlines():
+                m_line = line_re.match(line)
+                if not m_line:
+                    continue
+                p = VAULT / m_line.group(1)
+                m = key_re.match(p.stem.lower())
+                if m:
+                    key = f"{m.group(1)}_{m.group(2)}"
+                    index.setdefault(key, []).append(p)
+            if index:
+                return index
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # 2) find Linux
+    try:
+        proc = subprocess.run(
+            ["find", str(SOURCES), "-name", "*.pdf"],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                p = Path(line)
+                m = key_re.match(p.stem.lower())
+                if m:
+                    key = f"{m.group(1)}_{m.group(2)}"
+                    index.setdefault(key, []).append(p)
+            if index:
+                return index
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # 3) Fallback rglob Python (lent sur WSL mais fonctionne partout)
+    for p in SOURCES.rglob("*.pdf"):
+        m = key_re.match(p.stem.lower())
+        if m:
+            key = f"{m.group(1)}_{m.group(2)}"
+            index.setdefault(key, []).append(p)
+    return index
+
+
+def reset_orphan_cache() -> None:
+    """Invalide les caches PDF index et used. À appeler entre deux
+    sessions ingest si la session n'est pas un nouveau process.
+    """
+    global _PDF_INDEX_CACHE, _PDF_USED_CACHE
+    _PDF_INDEX_CACHE = None
+    _PDF_USED_CACHE = None
+
+
 def _find_orphan_pdf_for_citation(
     citation: "ParsedCitation",
 ) -> Optional[Path]:
-    """Scanne le dossier Sources pour trouver un PDF qui matche cette citation.
+    """Cherche un PDF orphelin dans Sources qui matche `<lastname>_<year>`.
 
-    Match (case-insensitive) :
-    - `<lastname>_<year>` au début du nom de fichier
-    - PDF non encore associé à une ref du registre
+    Caches module-level :
+    - `_PDF_INDEX_CACHE` : 1 scan rglob() au 1er appel, puis dict lookup.
+    - `_PDF_USED_CACHE` : 1 scan iter_refs() au 1er appel ; mis à jour au
+      fur et à mesure (ajout du PDF qu'on associe à chaque appel).
 
-    Utilisé pour les refs "Local" mentionnées dans les SOTAs : leur PDF
-    est déjà sur disque (le label "Local" signifie ça), mais pas encore
-    lié à une ref registre.
-
-    Retourne le Path absolu du PDF si trouvé, None sinon.
+    Pour invalider entre deux sessions ingest dans le même process,
+    appeler `reset_orphan_cache()`.
     """
+    global _PDF_INDEX_CACHE, _PDF_USED_CACHE
     from .config import SOURCES
+
     lastname = _extract_first_author_lastname(citation.author)
     year = re.sub(r"[^0-9]", "", citation.year or "")[:4]
     if not lastname or lastname == "unknown" or not year:
         return None
 
-    # PDFs déjà utilisés par d'autres refs
-    used = set()
-    for ref in iter_refs():
-        pp = ref.frontmatter.get("pdf_path")
-        if pp:
-            used.add(str((SOURCES / pp).resolve()))
+    if _PDF_INDEX_CACHE is None:
+        _PDF_INDEX_CACHE = _build_pdf_index()
+    if _PDF_USED_CACHE is None:
+        _PDF_USED_CACHE = set()
+        for ref in iter_refs():
+            pp = ref.frontmatter.get("pdf_path")
+            if pp:
+                try:
+                    _PDF_USED_CACHE.add(str((SOURCES / pp).resolve()))
+                except OSError:
+                    pass
 
-    # Patterns possibles (case-insensitive) : <Lastname>_<year>*.pdf
-    if not SOURCES.exists():
-        return None
-    lname_lower = lastname.lower()
-    for p in SOURCES.rglob("*.pdf"):
-        stem_lower = p.stem.lower()
-        if not stem_lower.startswith(f"{lname_lower}_{year}"):
+    key = f"{lastname.lower()}_{year}"
+    for p in _PDF_INDEX_CACHE.get(key, []):
+        resolved = str(p.resolve())
+        if resolved in _PDF_USED_CACHE:
             continue
-        if str(p.resolve()) in used:
-            continue
+        # Marqué utilisé pour éviter d'associer ce PDF à 2 refs créées
+        # dans la même session.
+        _PDF_USED_CACHE.add(resolved)
         return p
     return None
 
@@ -429,18 +598,47 @@ def _find_orphan_pdf_for_citation(
 def _try_validate_page1(pdf_path: Path, citation: "ParsedCitation") -> tuple[bool, str]:
     """Valide la page 1 d'un PDF contre les attributs d'une citation.
 
-    Réutilise validate_pdf_against_ref si dispo, sinon retourne (False, "...")
-    pour laisser la ref en candidate.
+    Hiérarchie RTFM-first :
+    1. Si RTFM a indexé le PDF avec du texte (chunks > 0, searchable),
+       valider via `validate_text_against_ref` sur les chunks RTFM.
+       Évite pdftotext (~5-30s/PDF sur WSL).
+    2. Fallback : `validate_pdf_against_ref` qui utilise pdftotext.
     """
+    expected_author = citation.author or ""
+    expected_year = str(citation.year or "")
+    expected_title = citation.title or ""
+
+    # 1) RTFM-first
+    try:
+        from .rtfm_helper import rtfm_status_for_ref, rtfm_first_chunks_text
+        from .config import SOURCES
+        verdict, info = rtfm_status_for_ref(pdf_path, sources_root=SOURCES)
+        if verdict == "ok" and info.get("chunks", 0) > 0:
+            rtfm_slug = info.get("rtfm_slug") or ""
+            rtfm_text = rtfm_first_chunks_text(rtfm_slug, n_chunks=10) if rtfm_slug else ""
+            if rtfm_text:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+                import validate_pdf_content as v
+                return v.validate_text_against_ref(
+                    rtfm_text,
+                    expected_author=expected_author,
+                    expected_year=expected_year,
+                    expected_title=expected_title,
+                )
+    except Exception:
+        pass
+
+    # 2) Fallback pdftotext (lent sur WSL)
     try:
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
         import validate_pdf_content as v
         return v.validate_pdf_against_ref(
             pdf_path,
-            expected_author=citation.author or "",
-            expected_year=str(citation.year or ""),
-            expected_title=citation.title or "",
+            expected_author=expected_author,
+            expected_year=expected_year,
+            expected_title=expected_title,
         )
     except Exception as e:
         return False, f"validation_error:{type(e).__name__}"
@@ -606,16 +804,38 @@ def _substitute_to_wikilink(
     if not raw:
         return False
     wikilink = _wikilink_for_slug(slug)
+    # Le `raw` du sub-agent peut ne pas matcher mot-à-mot le texte du
+    # SOTA (par exemple sub-agent retourne "Valiant, L.G. 1975 *...*"
+    # alors que SOTA a "- **Valiant, L.G. 1975** *...*"). On essaie le
+    # match strict d'abord, puis un match permissif sur l'ancre auteur+année.
+    raw_to_use = raw
+    if raw not in text:
+        # Cherche une ancre courte "<Lastname>... <year>" dans le texte
+        # et substitue à la ligne contenant cette ancre.
+        lastname_raw = (
+            _extract_first_author_lastname(citation.author).capitalize()
+        )
+        year_str = citation.year or ""
+        if lastname_raw and year_str:
+            # Cherche la première ligne contenant lastname ET year proches.
+            for line in text.splitlines():
+                if (lastname_raw.lower() in line.lower()
+                        and year_str in line
+                        and "[[" not in line):
+                    raw_to_use = line.strip()
+                    break
+    if raw_to_use not in text:
+        return False
     # Substitution multi-occurrences : on remplace TOUTES les occurrences
     # du `raw` exact dans le SOTA. Idempotence : on protège les occurrences
     # déjà préfixées par le wikilink en les marquant temporairement.
-    sentinel = f" WIKILINKED {slug} "
+    sentinel = f"___WIKILINKED___{slug}___WIKILINKED___"
     # 1) Marque les occurrences déjà wikilinkées pour qu'elles ne soient
     #    pas re-substituées.
-    already = f"{wikilink} — {raw}"
+    already = f"{wikilink} — {raw_to_use}"
     protected = text.replace(already, sentinel)
     # 2) Substitue toutes les occurrences restantes du raw nu.
-    substituted = protected.replace(raw, f"{wikilink} — {raw}")
+    substituted = protected.replace(raw_to_use, f"{wikilink} — {raw_to_use}")
     # 3) Restaure le sentinel.
     new_text = substituted.replace(sentinel, already)
     if new_text == text:
