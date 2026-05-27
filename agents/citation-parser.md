@@ -85,30 +85,60 @@ Field semantics :
 
 ## Rules
 
-1. **Skip sections** : if `input_text` starts with a header matching
-   one in `skip_sections` (case-insensitive), return `[]`. The user
-   has volontarily excluded these refs.
+1. **Parse EVERYTHING** by default. The input may be an entire SOTA
+   document, a bibliographic section, or a paragraph. Detect all
+   citations regardless of where they appear :
+   - **Section headers** like `## Références` or `## Sources` with a
+     formal list of citations
+   - **Sub-lists** like `- **Local** : <list>` or `- **À procurer** :
+     <list>`. The word "Local" means **these PDFs are already on disk**,
+     they ARE citations to ingest (not textbook labels to skip)
+   - **Inline citations** in prose paragraphs : `Auteur (YYYY)`,
+     `Smith et al., 2020`, `voir Heydari 2021`
+   - **Tables** with rows containing citations (e.g., `| Auteur YYYY |
+     "Titre" | Conf | DOI |`)
+   - **Notes/Footnotes** that mention authors+years
 
-2. **Confidence levels** : be conservative. If you're not sure
-   something is a citation (e.g., "Smith pense que…" without a year
-   or title), set `confidence: low`. The orchestrator will decide
-   whether to use or discard.
+2. **Skip ONLY explicitly excluded sections** : if a section header
+   matches one in `skip_sections` (case-insensitive), skip ALL its
+   content. Otherwise parse normally.
 
-3. **No fabrication** : never invent a DOI, arxiv_id, venue, or year.
+3. **Textbook detection** : even short refs like "Hopcroft FR + EN",
+   "Sipser FR (Ch. 1)", "Carton FR" ARE valid citations. They refer
+   to real textbooks. Try to extract :
+   - `author` : last name (e.g., "Hopcroft", "Sipser", "Carton")
+   - `year` : if present, else `null`
+   - `title` : if mentioned, else `null` or a placeholder like
+     "Introduction to Automata Theory" (Hopcroft) if context makes
+     it obvious. If not obvious, set `confidence: medium` and leave
+     title empty.
+   For textbooks without year, set `year: null` and `confidence: low`
+   — the orchestrator will flag for human resolution.
+
+4. **Confidence levels** :
+   - `high` : full citation with author, year, title, optionally DOI
+   - `medium` : author + year clear, title inferred from context
+   - `low` : likely a citation but ambiguous (no year, generic name,
+     short reference)
+
+5. **No fabrication** : never invent a DOI, arxiv_id, venue, or year.
    If the text doesn't have it, leave it `null`. Hallucinating a DOI
    would defeat the purpose of the entire plugin.
 
-4. **Multi-citation entries** : if one line lists multiple works
-   ("see e.g., Smith (2020), Jones (2021)"), return one record per
-   work.
+6. **Multi-citation entries** : if one line lists multiple works
+   ("see e.g., Smith (2020), Jones (2021)" or "Hopcroft, Sipser,
+   Carton"), return one record per work.
 
-5. **Wikilinks already present** : if the text contains
-   `[[some_slug]]`, do NOT parse what surrounds it as a new citation.
-   That ref is already ingested. (The orchestrator handles wikilinks
-   separately.)
+7. **Wikilinks already present** : if a citation is already wikilinked
+   (`[[slug]] — author year title`), DO NOT include it in the output
+   (it has been ingested already).
 
-6. **Self-references** : skip "ibid", "op. cit.", "id.", "cf. above"
+8. **Self-references** : skip "ibid", "op. cit.", "id.", "cf. above"
    and similar back-references.
+
+9. **Local vs distant** : DO NOT distinguish "Local" from "À procurer".
+   Both produce ParsedCitation records. The orchestrator will check
+   if the PDF exists on disk independently.
 
 ## Return discipline
 

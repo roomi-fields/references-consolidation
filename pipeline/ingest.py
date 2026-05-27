@@ -219,8 +219,12 @@ def _extract_first_author_lastname(author_text: str) -> str:
     return last or "unknown"
 
 
-def _to_ascii_lower(s: str) -> str:
-    """Normalise une chaîne en ASCII lowercase (best-effort)."""
+def _to_ascii_lower(s) -> str:
+    """Normalise une chaîne en ASCII lowercase (best-effort).
+    Tolère None et chaîne vide.
+    """
+    if not s:
+        return ""
     import unicodedata
     norm = unicodedata.normalize("NFKD", s)
     ascii_str = "".join(c for c in norm if not unicodedata.combining(c))
@@ -353,12 +357,12 @@ def _reconcile_with_registry(
 
 REF_TEMPLATE = """\
 ---
-state: candidate
+state: {state}
 slug: {slug}
 author: {author}
 year: '{year}'
 title: {title}
-{uid_line}\
+{uid_line}{pdf_line}\
 created_by: ingest
 created_at: '{created_at}'
 ingest_source: {sota_relpath}
@@ -368,7 +372,8 @@ state_history:
   meta:
     sota: {sota_relpath}
     confidence: {confidence}
-  state: candidate
+{pdf_history_line}\
+  state: {state}
 ---
 
 Reference ingested from {sota_relpath} on {created_at}.
@@ -377,6 +382,68 @@ Raw citation text from SOTA :
 
 > {raw}
 """
+
+
+def _find_orphan_pdf_for_citation(
+    citation: "ParsedCitation",
+) -> Optional[Path]:
+    """Scanne le dossier Sources pour trouver un PDF qui matche cette citation.
+
+    Match (case-insensitive) :
+    - `<lastname>_<year>` au début du nom de fichier
+    - PDF non encore associé à une ref du registre
+
+    Utilisé pour les refs "Local" mentionnées dans les SOTAs : leur PDF
+    est déjà sur disque (le label "Local" signifie ça), mais pas encore
+    lié à une ref registre.
+
+    Retourne le Path absolu du PDF si trouvé, None sinon.
+    """
+    from .config import SOURCES
+    lastname = _extract_first_author_lastname(citation.author)
+    year = re.sub(r"[^0-9]", "", citation.year or "")[:4]
+    if not lastname or lastname == "unknown" or not year:
+        return None
+
+    # PDFs déjà utilisés par d'autres refs
+    used = set()
+    for ref in iter_refs():
+        pp = ref.frontmatter.get("pdf_path")
+        if pp:
+            used.add(str((SOURCES / pp).resolve()))
+
+    # Patterns possibles (case-insensitive) : <Lastname>_<year>*.pdf
+    if not SOURCES.exists():
+        return None
+    lname_lower = lastname.lower()
+    for p in SOURCES.rglob("*.pdf"):
+        stem_lower = p.stem.lower()
+        if not stem_lower.startswith(f"{lname_lower}_{year}"):
+            continue
+        if str(p.resolve()) in used:
+            continue
+        return p
+    return None
+
+
+def _try_validate_page1(pdf_path: Path, citation: "ParsedCitation") -> tuple[bool, str]:
+    """Valide la page 1 d'un PDF contre les attributs d'une citation.
+
+    Réutilise validate_pdf_against_ref si dispo, sinon retourne (False, "...")
+    pour laisser la ref en candidate.
+    """
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+        import validate_pdf_content as v
+        return v.validate_pdf_against_ref(
+            pdf_path,
+            expected_author=citation.author or "",
+            expected_year=str(citation.year or ""),
+            expected_title=citation.title or "",
+        )
+    except Exception as e:
+        return False, f"validation_error:{type(e).__name__}"
 
 
 def _create_ref(
@@ -407,12 +474,53 @@ def _create_ref(
     except ValueError:
         sota_relpath = str(sota_path)
 
+    # Cherche un PDF orphelin matchant (pour les refs "Local" qui ont
+    # leur PDF déjà sur disque). Si trouvé + page 1 valide → state
+    # directement page1_validated.
+    orphan = _find_orphan_pdf_for_citation(citation)
+    state = "candidate"
+    pdf_line = ""
+    pdf_history_line = ""
+    if orphan is not None:
+        from .config import SOURCES
+        rel_pdf = str(orphan.relative_to(SOURCES))
+        is_ok, reason = _try_validate_page1(orphan, citation)
+        if is_ok:
+            state = "page1_validated"
+            # Calculer sha256 du PDF
+            import hashlib
+            try:
+                sha = hashlib.sha256(orphan.read_bytes()).hexdigest()
+                pdf_line = (
+                    f"pdf_path: {rel_pdf}\n"
+                    f"pdf_sha256: '{sha}'\n"
+                    f"pdf_origin: orphan_match_at_ingest\n"
+                )
+                pdf_history_line = (
+                    f"    pdf_path: {rel_pdf}\n"
+                    f"    pdf_origin: orphan_match\n"
+                    f"    page1_validation: ok\n"
+                )
+            except OSError:
+                state = "candidate"
+                pdf_line = ""
+        else:
+            # PDF trouvé mais page 1 ne valide pas — on garde candidate
+            # avec un flag pour audit ultérieur.
+            pdf_line = (
+                f"# PDF orphelin trouvé mais page 1 invalide ({reason}) — "
+                f"non associé\n"
+            )
+
     content = REF_TEMPLATE.format(
         slug=slug,
+        state=state,
         author=_yaml_quote(citation.author),
         year=citation.year or "0000",
         title=_yaml_quote(citation.title),
         uid_line=uid_line,
+        pdf_line=pdf_line,
+        pdf_history_line=pdf_history_line,
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         sota_relpath=sota_relpath,
         confidence=citation.confidence,
