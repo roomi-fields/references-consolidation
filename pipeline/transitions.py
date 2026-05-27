@@ -356,6 +356,50 @@ def pdf_acquired_dispatch(ref: Ref) -> TransitionResult:
         return TransitionResult(False, "pdf_acquired", None, "no_pdf_path",
                                 blocked_reason="no_pdf_path_in_yaml")
 
+    # RTFM-first : si le PDF est déjà indexé par RTFM avec du texte
+    # searchable, on valide via le texte RTFM (plus rapide + plus fiable
+    # que pdftotext sur PDFs lourds ou layouts complexes). Pdftotext reste
+    # en fallback si RTFM ne sait pas servir ce PDF.
+    try:
+        from .rtfm_helper import rtfm_status_for_ref, rtfm_first_chunks_text
+        from pipeline.config import SOURCES
+        rtfm_verdict, rtfm_info = rtfm_status_for_ref(pdf_abs,
+                                                     sources_root=SOURCES)
+    except Exception:
+        rtfm_verdict, rtfm_info = "missing_in_index", {}
+
+    if rtfm_verdict == "ok" and rtfm_info.get("chunks", 0) > 0:
+        rtfm_text = rtfm_first_chunks_text(rtfm_info.get("rtfm_slug", ""),
+                                           n_chunks=10)
+        if rtfm_text:
+            is_ok, reason = v.validate_text_against_ref(
+                rtfm_text,
+                expected_author=ref.frontmatter.get("author") or "",
+                expected_year=str(ref.frontmatter.get("year") or ""),
+                expected_title=ref.frontmatter.get("title") or "",
+            )
+            log = {
+                "at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "probe_category": "rtfm_text",
+                "verdict": reason,
+                "rtfm_chunks": rtfm_info.get("chunks", 0),
+            }
+            ref.frontmatter["page1_validation_log"] = log
+            if is_ok:
+                from .cascade import cleanup_quarantine_for_ref
+                n_clean = cleanup_quarantine_for_ref(ref.slug)
+                append_state_history(ref, "page1_validated", by="worker_b",
+                                     meta={"probe": "rtfm_text",
+                                           "verdict": reason,
+                                           "rtfm_chunks": rtfm_info.get("chunks", 0),
+                                           "quarantine_cleaned": n_clean})
+                save_ref(ref)
+                return TransitionResult(True, "pdf_acquired", "page1_validated",
+                                        "rtfm_text_validate_passed",
+                                        meta={"rtfm_chunks": rtfm_info.get("chunks", 0)})
+            # Si validation RTFM échoue (mismatch contenu), on continue avec
+            # probe_pdf_health pour confirmer/croiser via pdftotext.
+
     category, detail = v.probe_pdf_health(pdf_abs)
 
     if category in ("ok_has_text", "ok_epub"):
