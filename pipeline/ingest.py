@@ -56,13 +56,52 @@ class ParsedCitation:
 
 @dataclass
 class IngestResult:
-    """Résultat d'ingestion d'un SOTA."""
+    """Résultat d'ingestion d'un SOTA.
+
+    Contient des compteurs de qualité observables session par session
+    (cf. H6 du plan robustesse) : taux DOI résolus, taux refs matchées vs
+    nouvelles, taux substitutions / citations, durée.
+    """
     sota_path: Path
     new_refs: list[str] = field(default_factory=list)
     reused_refs: list[str] = field(default_factory=list)
     skipped_low_confidence: list[str] = field(default_factory=list)
     substitutions: int = 0
     errors: list[str] = field(default_factory=list)
+    # Compteurs métriques (H6)
+    citations_total: int = 0
+    doi_resolved: int = 0
+    matched_by_doi: int = 0
+    matched_by_fuzzy: int = 0
+    orphan_pdfs_found: int = 0
+    page1_validated: int = 0
+    duration_seconds: float = 0.0
+
+    def to_metrics_dict(self) -> dict:
+        """Sérialise les métriques en dict JSON-compatible.
+
+        Format consommable par H7 (fixtures de test) et par les hooks de
+        monitoring batch.
+        """
+        try:
+            sota_rel = str(self.sota_path.relative_to(VAULT))
+        except (ValueError, OSError):
+            sota_rel = str(self.sota_path)
+        return {
+            "sota": sota_rel,
+            "citations_total": self.citations_total,
+            "doi_resolved": self.doi_resolved,
+            "matched_by_doi": self.matched_by_doi,
+            "matched_by_fuzzy": self.matched_by_fuzzy,
+            "new_refs_created": len(self.new_refs),
+            "reused_refs": len(self.reused_refs),
+            "orphan_pdfs_found": self.orphan_pdfs_found,
+            "page1_validated": self.page1_validated,
+            "wikilinks_substituted": self.substitutions,
+            "skipped_low_confidence": len(self.skipped_low_confidence),
+            "duration_seconds": round(self.duration_seconds, 2),
+            "errors": self.errors,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1068,7 +1107,10 @@ def ingest_citations(
 
     Retourne un IngestResult.
     """
+    import time
     result = IngestResult(sota_path=sota_path)
+    result.citations_total = len(citations)
+    t_start = time.time()
     for cit in citations:
         if skip_low_confidence and cit.confidence == "low":
             result.skipped_low_confidence.append(cit.raw[:60])
@@ -1076,16 +1118,33 @@ def ingest_citations(
         try:
             doi = _identify_doi(cit)
             cit.resolved_doi = doi
+            if doi:
+                result.doi_resolved += 1
             existing_slug = _reconcile_with_registry(cit, doi)
             if existing_slug:
                 cit.matched_slug = existing_slug
                 slug = existing_slug
                 result.reused_refs.append(slug)
+                if doi:
+                    result.matched_by_doi += 1
+                else:
+                    result.matched_by_fuzzy += 1
             else:
                 if apply:
                     slug = _create_ref(cit, doi, sota_path)
                     cit.created_slug = slug
                     result.new_refs.append(slug)
+                    # Détecter PDF orphelin trouvé + validé page 1 via state final
+                    try:
+                        ref_path = REFS / f"{slug}.md"
+                        if ref_path.exists():
+                            ref = load_ref(ref_path)
+                            if ref and ref.frontmatter.get("pdf_path"):
+                                result.orphan_pdfs_found += 1
+                            if ref and ref.frontmatter.get("state") == "page1_validated":
+                                result.page1_validated += 1
+                    except Exception:
+                        pass
                 else:
                     # Dry-run : on calcule juste le slug qui serait créé
                     slug = _make_slug(cit.author, cit.year, cit.title)
@@ -1098,6 +1157,7 @@ def ingest_citations(
             result.errors.append(
                 f"{type(e).__name__}: {e} (citation: {cit.raw[:60]!r})"
             )
+    result.duration_seconds = time.time() - t_start
     return result
 
 

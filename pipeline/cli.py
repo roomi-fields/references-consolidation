@@ -616,18 +616,29 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         result = ingest_mod.ingest_citations_from_json(
             sota, json_path, apply=apply
         )
+        # Mode JSON structuré : pour scripting et fixtures (H6)
+        if getattr(args, "json_output", False):
+            print(json.dumps(result.to_metrics_dict(), ensure_ascii=False,
+                             indent=2))
+            return 1 if result.errors else 0
+        # Mode texte humain
+        m = result.to_metrics_dict()
         print(f"\n=== Ingest result : {sota.name} ===")
-        print(f"  apply={apply}")
-        print(f"  new_refs    : {len(result.new_refs)}")
+        print(f"  apply={apply}  duration={m['duration_seconds']}s")
+        print(f"  citations    : {m['citations_total']} "
+              f"(doi_resolved {m['doi_resolved']}, skipped_low "
+              f"{m['skipped_low_confidence']})")
+        print(f"  new_refs     : {m['new_refs_created']}")
         for s in result.new_refs[:20]:
             print(f"    + {s}")
-        print(f"  reused_refs : {len(result.reused_refs)}")
+        print(f"  reused_refs  : {m['reused_refs']} "
+              f"(by_doi {m['matched_by_doi']}, by_fuzzy {m['matched_by_fuzzy']})")
         for s in result.reused_refs[:20]:
             print(f"    = {s}")
-        print(f"  substitutions: {result.substitutions}")
-        if result.skipped_low_confidence:
-            print(f"  skipped (low confidence) : "
-                  f"{len(result.skipped_low_confidence)}")
+        print(f"  substitutions: {m['wikilinks_substituted']}")
+        if m["orphan_pdfs_found"]:
+            print(f"  orphan PDFs  : {m['orphan_pdfs_found']} "
+                  f"({m['page1_validated']} validated page 1)")
         if result.errors:
             print(f"  errors : {len(result.errors)}")
             for e in result.errors[:5]:
@@ -927,6 +938,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Applique l'ingestion (crée refs + substitue). Sans : dry-run.")
     pin.add_argument("--all", dest="all_sotas", action="store_true",
                      help="Scan tous les SOTAs du vault (dry-run par défaut)")
+    pin.add_argument("--json", dest="json_output", action="store_true",
+                     help="Sortie JSON structurée (métriques) au lieu du récap "
+                          "humain. Pour scripting et fixtures de test.")
     pin.set_defaults(func=cmd_ingest)
 
     pru = sub.add_parser("retract-uncited",
