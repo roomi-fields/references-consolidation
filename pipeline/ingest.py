@@ -1040,26 +1040,23 @@ def _substitute_to_wikilink(
     def _alphanum(s: str) -> str:
         return re.sub(r"[^a-z0-9]", "", s.lower())
 
-    # Tier 1 : match strict du raw — mais en respectant l'idempotence par
-    # lastname (si la ligne contenant le raw a déjà un wikilink pour ce
-    # lastname, on ne double-substitue pas).
+    # Tier 1 : match strict du raw, ligne par ligne. Une ligne contenant
+    # le raw est substituée SAUF si elle a déjà un wikilink avec ce lastname
+    # (idempotence locale, pas globale — on substitue les autres occurrences
+    # même si une ligne de récap est déjà wikilinkée).
     if raw and raw in text:
-        already_wikilinked = False
-        for line in text.splitlines():
-            if raw in line and _line_already_has_lastname_wikilink(
-                line, lastname_anorm
-            ):
-                already_wikilinked = True
-                break
-        if not already_wikilinked:
-            sentinel = f"___WIKILINKED___{slug}___WIKILINKED___"
-            already = f"{wikilink} — {raw}"
-            protected = text.replace(already, sentinel)
-            substituted = protected.replace(raw, f"{wikilink} — {raw}")
-            new_text = substituted.replace(sentinel, already)
-            if new_text != text:
-                sota_path.write_text(new_text, encoding="utf-8")
-                return True
+        new_lines = []
+        any_subst = False
+        for line in text.split("\n"):
+            if (raw in line and not _line_already_has_lastname_wikilink(
+                    line, lastname_anorm)):
+                new_lines.append(line.replace(raw, f"{wikilink} — {raw}", 1))
+                any_subst = True
+            else:
+                new_lines.append(line)
+        if any_subst:
+            sota_path.write_text("\n".join(new_lines), encoding="utf-8")
+            return True
 
     # Tier 2 : ancrage scoré ligne par ligne (besoin du lastname)
     if not lastname_lc:
@@ -1104,7 +1101,31 @@ def _substitute_to_wikilink(
     if best_line is None or best_score < threshold:
         return False
 
-    new_line = _prefix_line_with_wikilink(best_line, wikilink)
+    # Position d'insertion : juste devant le lastname dans la ligne, pas en
+    # tête. Permet de gérer correctement les bullets multi-citations type
+    # "- **Local** : Hopcroft FR, Sipser FR, Carton FR".
+    # Si année connue : on cherche `lastname...year` proches pour éviter
+    # de matcher le lastname dans un nom composé (ex "Cocke-Younger-Kasami").
+    insert_pos = None
+    if year_str:
+        m = re.search(
+            rf"\b{re.escape(lastname)}\b[^\n]{{0,80}}{re.escape(year_str)}",
+            best_line, re.IGNORECASE,
+        )
+        if m:
+            insert_pos = m.start()
+    if insert_pos is None:
+        m = re.search(rf"\b{re.escape(lastname)}\b", best_line, re.IGNORECASE)
+        if m:
+            insert_pos = m.start()
+
+    if insert_pos is not None:
+        new_line = (
+            best_line[:insert_pos] + f"{wikilink} — " + best_line[insert_pos:]
+        )
+    else:
+        # Fallback : préfixe en tête de ligne (préserve marker de liste)
+        new_line = _prefix_line_with_wikilink(best_line, wikilink)
     if new_line == best_line:
         return False
     new_text = text.replace(best_line, new_line, 1)
