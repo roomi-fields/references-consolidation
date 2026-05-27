@@ -322,9 +322,11 @@ def _reconcile_with_registry(
 
     for ref in iter_refs():
         fm = ref.frontmatter
-        # 1. DOI strict
-        if doi and fm.get("uid", "").startswith("doi:"):
-            ref_doi = fm["uid"][4:].strip().lower()
+        # 1. DOI strict (uid peut être None explicite dans le YAML, pas
+        # seulement absent — `or ""` couvre les deux cas)
+        ref_uid = fm.get("uid") or ""
+        if doi and ref_uid.startswith("doi:"):
+            ref_doi = ref_uid[4:].strip().lower()
             if ref_doi == doi.lower():
                 return ref.slug
         # 2. Fuzzy : auteur + année + titre
