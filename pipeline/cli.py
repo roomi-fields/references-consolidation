@@ -332,6 +332,24 @@ def cmd_arbitrate(args: argparse.Namespace) -> int:
                  f"arbitrate:{decision}", {"reason": reason})
     print(f"[ok] {slug}  {from_state} → {ref.frontmatter['state']}  "
           f"({decision}: {reason[:50]})")
+
+    # Propagation cohérence SOTA ↔ registre (Phase 2 du plan refonte INGEST).
+    # Si on retract, les wikilinks dans les SOTAs deviennent obsolètes.
+    if decision == "retract":
+        try:
+            from .sota_sync import update_wikilinks_in_sotas
+            sync = update_wikilinks_in_sotas(
+                old_slug=slug, new_slug=None,
+                reason=f"retract:{reason[:60]}",
+            )
+            if sync.total_substitutions > 0:
+                print(f"       sync: {sync.total_substitutions} wikilink(s) "
+                      f"retiré(s) dans {len(sync.sotas_touched)} SOTA(s)")
+            if sync.errors:
+                for e in sync.errors[:3]:
+                    print(f"       sync error: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARN] sota_sync échoué : {e}", file=sys.stderr)
     return 0
 
 
@@ -458,6 +476,23 @@ def cmd_resolve_textbooks(args: argparse.Namespace) -> int:
                          "resolve_textbooks:merge", {"merged_into": target})
             n_merged += 1
             print(f"[merge] {slug} → {target}")
+            # Propagation cohérence : remplace les wikilinks `[[slug]]` par
+            # `[[target]]` dans les SOTAs (Phase 2 du plan refonte INGEST).
+            try:
+                from .sota_sync import update_wikilinks_in_sotas
+                sync = update_wikilinks_in_sotas(
+                    old_slug=slug, new_slug=target,
+                    reason=f"merged_into:{target}",
+                )
+                if sync.total_substitutions > 0:
+                    print(f"        sync: {sync.total_substitutions} "
+                          f"wikilink(s) → {target} dans "
+                          f"{len(sync.sotas_touched)} SOTA(s)")
+                if sync.errors:
+                    for e in sync.errors[:3]:
+                        print(f"        sync error: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"[WARN] sota_sync échoué : {e}", file=sys.stderr)
         elif action == "complete":
             year = d.get("year")
             title = d.get("title")
@@ -716,6 +751,8 @@ def cmd_retract_uncited(args: argparse.Namespace) -> int:
               "auto-retract: not cited in any SOTA or article (only in registry INDEX)")
     n_ok = 0
     n_err = 0
+    n_sota_sub = 0
+    n_sota_files = set()
     for ref in candidates:
         from_state = ref.state
         try:
@@ -728,10 +765,28 @@ def cmd_retract_uncited(args: argparse.Namespace) -> int:
             append_event(ref.slug, from_state, "retracted",
                          "retract_uncited", {"reason": reason})
             n_ok += 1
+            # Propagation cohérence : defense-in-depth. Par construction,
+            # retract_uncited ne cible que des refs non citées, donc sync
+            # devrait être no-op. Mais si l'index a une stale entry, on
+            # garde au moins la trace (Phase 2 du plan refonte INGEST).
+            try:
+                from .sota_sync import update_wikilinks_in_sotas
+                sync = update_wikilinks_in_sotas(
+                    old_slug=ref.slug, new_slug=None,
+                    reason=f"retract_uncited:{reason[:60]}",
+                    skip_git_backup=True,  # backup global déjà fait en amont
+                )
+                n_sota_sub += sync.total_substitutions
+                n_sota_files.update(sync.sotas_touched)
+            except Exception as e:
+                print(f"[WARN] sota_sync {ref.slug} : {e}", file=sys.stderr)
         except Exception as e:
             print(f"[ERR] {ref.slug}: {type(e).__name__}: {e}", file=sys.stderr)
             n_err += 1
     print(f"\nRetracted: {n_ok}/{len(candidates)} (errors: {n_err})")
+    if n_sota_sub > 0:
+        print(f"Sync: {n_sota_sub} wikilink(s) retiré(s) dans "
+              f"{len(n_sota_files)} SOTA(s)")
     return 1 if n_err else 0
 
 
