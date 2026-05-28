@@ -706,6 +706,90 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_purge(args: argparse.Namespace) -> int:
+    """Nettoie les wikilinks invalides d'un SOTA.
+
+    6 cas détectés (cf. pipeline/purge.py) :
+      - wikilink vers ref retracted (avec ou sans merge_into)
+      - wikilink vers `_0000_*` ayant un sibling complet
+      - wikilink avec suffixe numérique moche `_2_3_4`
+      - wikilink vers fichier technique (20_ATLAS/, 30_DEV/, .canvas)
+      - wikilink vers slug non-bibliographique (IR_Spec_Preliminaire etc.)
+
+    Modes :
+      - défaut : dry-run, affiche le plan
+      - --apply : applique + backup git auto
+      - --json : sortie JSON structurée
+    """
+    from . import purge as purge_mod
+    from .ingest import _ensure_git_backup
+    from pathlib import Path as _Path
+
+    sota = _Path(args.sota)
+    if not sota.exists():
+        print(f"[ERR] SOTA introuvable : {sota}", file=sys.stderr)
+        return 2
+
+    result = purge_mod.plan_purge(sota)
+    apply = bool(getattr(args, "apply", False))
+    json_output = bool(getattr(args, "json_output", False))
+
+    if apply:
+        from .config import VAULT
+        if not _ensure_git_backup(VAULT, f"paper-trail purge before {sota.name}"):
+            print("[ERR] backup git impossible. Annulation.", file=sys.stderr)
+            return 2
+        purge_mod.apply_purge(result)
+
+    if json_output:
+        out = {
+            "sota": str(sota),
+            "apply": apply,
+            "n_actions": len(result.actions),
+            "n_applied": result.n_applied,
+            "by_reason": result.by_reason(),
+            "actions": [
+                {
+                    "line_no": a.line_no,
+                    "raw_wikilink": a.raw_wikilink,
+                    "reason": a.reason.value,
+                    "replacement": a.replacement,
+                    "sibling_slug": a.sibling_slug,
+                }
+                for a in result.actions
+            ],
+            "errors": result.errors,
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 1 if result.errors else 0
+
+    # Format texte humain
+    by_reason = result.by_reason()
+    print(f"\n=== Purge plan : {sota.name} ===")
+    print(f"  Mode: {'APPLY' if apply else 'DRY-RUN'}")
+    print(f"  Total wikilinks invalides : {len(result.actions)}")
+    if by_reason:
+        for reason, count in sorted(by_reason.items()):
+            print(f"    {reason:35s} : {count}")
+    if result.actions:
+        print(f"\n  Détails (max 15) :")
+        for a in result.actions[:15]:
+            note = (f"→ {a.sibling_slug}" if a.sibling_slug
+                    else "→ strip" if a.replacement is None
+                    else f"→ {a.replacement}")
+            print(f"    L{a.line_no:>4}  {a.raw_wikilink:<60}  "
+                  f"{a.reason.value} {note}")
+    if apply:
+        print(f"\n  Applied: {result.n_applied}")
+    else:
+        print(f"\n  Dry-run. Utilise --apply pour exécuter.")
+    if result.errors:
+        print(f"\n  Errors: {len(result.errors)}")
+        for e in result.errors[:3]:
+            print(f"    {e}")
+    return 1 if result.errors else 0
+
+
 def cmd_retract_uncited(args: argparse.Namespace) -> int:
     """Retract en lot toutes les refs actives non citées hors registre INDEX.
 
@@ -998,6 +1082,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "humain. Pour scripting et fixtures de test.")
     pin.set_defaults(func=cmd_ingest)
 
+    ppu = sub.add_parser("purge",
+                         help="Nettoie les wikilinks invalides d'un SOTA "
+                              "(retracted, _0000_*, suffixes moches, paths "
+                              "techniques)")
+    ppu.add_argument("sota", help="Chemin du SOTA à purger")
+    ppu.add_argument("--apply", action="store_true",
+                     help="Applique le plan (défaut : dry-run, affiche)")
+    ppu.add_argument("--json", dest="json_output", action="store_true",
+                     help="Sortie JSON structurée pour scripting")
+    ppu.set_defaults(func=cmd_purge)
+
     pru = sub.add_parser("retract-uncited",
                          help="Retract en lot les refs actives non citées hors INDEX")
     pru.add_argument("--apply", action="store_true",
@@ -1058,7 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Sous-commandes qui mutent le registre — protégées par WorkerLock pour
 # éviter 2 sessions concurrentes. Les read-only (status, lint, doctor, events)
 # ne sont PAS wrappées.
-_MUTATING_CMDS = {"run", "reactivate-ocr"}
+_MUTATING_CMDS = {"run", "reactivate-ocr", "purge"}
 
 
 def main(argv: list[str] | None = None) -> int:
