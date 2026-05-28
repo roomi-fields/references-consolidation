@@ -1162,10 +1162,22 @@ def ingest_citations(
     result = IngestResult(sota_path=sota_path)
     result.citations_total = len(citations)
     t_start = time.time()
+    # Validation P3 : raw doit être un substring littéral du SOTA. Si non,
+    # le sub-agent citation-parser a enrichi raw au-delà du texte source —
+    # signal d'un trou du contrat (cf. agents/citation-parser.md règle 10).
+    # On flag mais on ne bloque pas (Tier 2 ancrage rattrape).
+    try:
+        sota_text_for_check = sota_path.read_text(encoding="utf-8")
+    except OSError:
+        sota_text_for_check = ""
     for cit in citations:
         if skip_low_confidence and cit.confidence == "low":
             result.skipped_low_confidence.append(cit.raw[:60])
             continue
+        if cit.raw and sota_text_for_check and cit.raw not in sota_text_for_check:
+            result.errors.append(
+                f"raw_not_literal: {cit.raw[:80]!r}"
+            )
         try:
             doi = _identify_doi(cit)
             cit.resolved_doi = doi

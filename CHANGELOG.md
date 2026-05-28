@@ -5,6 +5,61 @@ All notable changes to the `paper-trail` plugin are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-28
+
+Major rework of the INGEST pipeline : split into 4 orthogonal passes
+(identify / purge / acquire / linkify) + chronic SOTA ↔ registry
+coherence guarantee. Breaking semantic change in the `citation-parser`
+sub-agent contract.
+
+### Added
+
+- **`pipeline/sota_sync.py`** — central utility for propagating slug
+  mutations (retract, merge) to all SOTAs in the vault. Replaces the
+  silent desynchronization where `cmd_arbitrate retract` or
+  `cmd_resolve_textbooks merge_into` mutated the registry without
+  updating the wikilinks in SOTAs.
+
+- **Automatic sync hook** : `cmd_arbitrate decision=retract`,
+  `cmd_resolve_textbooks action=merge_into`, and
+  `cmd_retract_uncited --apply` now trigger `update_wikilinks_in_sotas`
+  automatically. Invariants I22/I23 become self-healing for future
+  mutations.
+
+- **Test suites** : `pipeline/tests/test_sota_sync.py` (9/9 unit),
+  `pipeline/tests/test_p2_sync_branchements.py` (2/2 integration).
+
+### Changed
+
+- **`agents/citation-parser.md` v2** (breaking semantic) :
+  - Rule 10 (NEW) : `raw` must be a strict literal substring of
+    `input_text`. Enrichment of `year`/`title` from context is OK
+    but `raw` stays the local short mention.
+  - Rule 11 (NEW) : multiple mentions of the same work produce
+    multiple records, NOT one. Replaces the old destructive dedup
+    rule 3.last ("return ONE record with the most complete mention").
+  - Consequence : table cells like `| Younger 1967 |` now produce a
+    record with `raw="Younger 1967"` (instead of being absorbed by the
+    full citation), enabling wikilink substitution in tables.
+
+- **`pipeline/ingest.py::ingest_citations`** : added validation that
+  `cit.raw` is a literal substring of the SOTA text. Mismatch is logged
+  in `IngestResult.errors` (not blocking — Tier 2 anchoring still
+  catches via fuzzy match).
+
+### Plan refonte INGEST — phases restantes
+
+See `plans/compressed-painting-squid.md` for details.
+
+- P4 — `pipeline/purge.py` + `/paper-trail:purge` (cleanup wikilinks
+  invalides : retracted, `_0000_*` orphans, ugly suffixes `_2_3_4`,
+  technical paths `20_ATLAS/`, `.canvas`).
+- P5 — `pipeline/identify.py` + `pipeline/linkify.py` + idempotent
+  `## Statut des sources` section at the bottom of each SOTA.
+- P6 — `pipeline/acquire.py` (targeted cascade wrapper).
+- P7 — Auto-fix I22/I23 in `pipeline doctor --fix`.
+- P8 — `/paper-trail:registry-cleanup` + global invariance tests.
+
 ## [0.1.0] — 2026-05-25
 
 First release. Anti-hallucination Claude Code plugin for academic

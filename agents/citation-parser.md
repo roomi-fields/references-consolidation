@@ -2,6 +2,7 @@
 name: citation-parser
 description: Sub-agent that parses bibliographic sections and inline citations from SOTA / article text. Takes raw text (a section header + content, or an inline excerpt) and returns structured JSON `[{author, year, title, doi?, venue?, raw}]`. Isolates the LLM extraction from the main agent context. Invoke from the INGEST pipeline whenever a SOTA's bibliographic section or paragraph needs structured citation extraction.
 tools: [Read, Write]
+version: 2
 ---
 
 # Sub-agent : citation-parser
@@ -131,8 +132,11 @@ Field semantics :
      set `year: null` and `title: null` and `confidence: low` — a
      later resolve-textbook pass will handle these.
 
-   - **Same source mentioned multiple times** : return ONE record with
-     `raw` = the most complete mention found in the document.
+   - **Enriched fields vs. raw**: when you enrich `year`/`title` from
+     context, the enriched fields go into `year` / `title`. **`raw`
+     stays the local short mention** (e.g., for "Sipser FR" in the
+     text, `raw="Sipser FR"` even if you inferred `year=2012` and
+     `title="Introduction to the Theory of Computation"`). See rule 10.
 
 4. **Confidence levels** :
    - `high` : full citation with author, year, title, optionally DOI
@@ -158,6 +162,33 @@ Field semantics :
 9. **Local vs distant** : DO NOT distinguish "Local" from "À procurer".
    Both produce ParsedCitation records. The orchestrator will check
    if the PDF exists on disk independently.
+
+10. **`raw` is a LITERAL substring of `input_text`** (strict). Never
+    rewrite, expand, normalize, or merge `raw` from multiple sources.
+    The pipeline uses `raw` to locate the citation in the SOTA text for
+    wikilink substitution; if `raw` is not present literally, the
+    substitution falls back to fuzzy anchoring and may miss the target.
+
+    Examples :
+    - Table cell `| **CYK** | O(n³) | Younger 1967 |` → `raw = "Younger 1967"`
+      (the literal cell content, **not** "Younger, D.H. 1967 *Recognition...*"
+      reconstructed from the bibliography section)
+    - Bullet item `- **Vijay-Shanker, K. 1987** *A Study of Tree Adjoining
+      Grammars*, PhD Thesis.` → `raw = "Vijay-Shanker, K. 1987 *A Study of
+      Tree Adjoining Grammars*, PhD Thesis"` (the literal bullet, including
+      markdown formatting if present)
+    - Inline mention `voir Knuth 1965 (LR)` → `raw = "Knuth 1965 (LR)"`
+
+11. **Multiple mentions of the same work → multiple records** (NOT one).
+    If the same work appears as a brief mention in a paragraph
+    ("Younger 1967") AND as a full citation in a Sources section
+    ("Younger, D.H. 1967 *Recognition...*"), produce **TWO records**
+    with two different `raw` and two different `source_offset`. The
+    pipeline will deduplicate after DOI/UID resolution but will use
+    both `raw` to substitute wikilinks at the two text locations.
+
+    This rule replaces the older "return ONE record with the most
+    complete mention" which was destructive for short mentions.
 
 ## Return discipline
 
