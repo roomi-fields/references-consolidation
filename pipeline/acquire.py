@@ -50,41 +50,25 @@ def slugs_cited_by_sota(
 ) -> list[str]:
     """Renvoie les slugs liés au SOTA.
 
-    Source :
-    1. Wikilinks existants dans le SOTA (parse_citations + alias-aware)
-    2. Slugs à créer / matchés depuis IdentifyReport si fourni
+    Sources (par ordre de priorité) :
+    1. IdentifyReport : source autoritative — sait les vrais slugs registry
+       (matched_slug ou would_create_slug). On la consomme EN PREMIER.
+    2. Fallback : wikilinks `[[slug]]` simples du SOTA (sans alias, sans
+       path technique, sans extension PDF, sans ancre `#`).
 
-    Déduplique. Ignore les paths techniques et les slugs non-bibliographiques.
+    Wikilinks SKIPÉS dans le fallback (cas où l'alias court n'est pas
+    un slug registry valide) :
+    - `[[Path/File.pdf|alias]]` : la ref a déjà un PDF → inutile d'acquérir
+    - `[[#^source-foo-2020|alias]]` : ancre Statut locale, pas un slug
+    - `[[20_ATLAS/...]]`, `[[*.canvas]]` : path technique
+
+    Déduplique.
     """
     from .sota_sync import _WIKILINK_PATTERN
     seen: set[str] = set()
     slugs: list[str] = []
 
-    # 1. Wikilinks existants
-    try:
-        text = sota_path.read_text(encoding="utf-8")
-    except OSError:
-        text = ""
-
-    for m in _WIKILINK_PATTERN.finditer(text):
-        target = m.group(1)
-        alias = m.group(2)
-        # Skip paths techniques
-        if any(target.startswith(p) for p in (
-                "20_ATLAS/", "30_DEV/", "00_MANAGEMENT/")):
-            continue
-        if target.endswith(".canvas"):
-            continue
-        base = alias if alias else Path(target).stem
-        base_lower = base.lower()
-        # Skip slugs non-bib (TitleCase avec underscores)
-        if not _looks_like_bib_slug(base):
-            continue
-        if base_lower not in seen:
-            seen.add(base_lower)
-            slugs.append(base_lower)
-
-    # 2. Slugs depuis IdentifyReport (matched_slug ou would_create_slug)
+    # 1. IdentifyReport (autoritative)
     if identify_report is not None:
         for m in identify_report.mentions:
             if m.action_recommended == "skipped_low_confidence":
@@ -93,6 +77,34 @@ def slugs_cited_by_sota(
             if slug and slug.lower() not in seen:
                 seen.add(slug.lower())
                 slugs.append(slug.lower())
+
+    # 2. Fallback : wikilinks `[[slug]]` simples du SOTA
+    try:
+        text = sota_path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+
+    for m in _WIKILINK_PATTERN.finditer(text):
+        target = m.group(1)
+        # Skip ancre locale `[[#header]]` ou `[[#^block]]`
+        if target.startswith("#"):
+            continue
+        # Skip path technique
+        if any(target.startswith(p) for p in (
+                "20_ATLAS/", "30_DEV/", "00_MANAGEMENT/")):
+            continue
+        if target.endswith(".canvas"):
+            continue
+        # Skip wikilink PDF : la ref est déjà associée à un PDF
+        if target.lower().endswith(".pdf"):
+            continue
+        # target restant est un slug simple (`[[slug]]`)
+        base_lower = target.lower()
+        if not _looks_like_bib_slug(target):
+            continue
+        if base_lower not in seen:
+            seen.add(base_lower)
+            slugs.append(base_lower)
 
     return slugs
 

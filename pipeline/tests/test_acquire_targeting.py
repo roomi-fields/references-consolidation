@@ -45,12 +45,14 @@ def test_T_slugs_cited_by_sota_extract_wikilinks(tmp_path):
         encoding="utf-8",
     )
     slugs = slugs_cited_by_sota(sota)
-    # Doit contenir knuth, hopcroft (via alias), earley
+    # [[slug]] simples extraits
     assert "knuth_1965_lr" in slugs
-    assert "hopcroft_2001_intro" in slugs
     assert "earley_1970_efficient" in slugs
-    # Doit exclure path technique et non-bib
+    # [[Path/File.pdf|alias]] skipped : la ref a déjà un PDF, inutile d'acquérir
+    assert "hopcroft_2001_intro" not in slugs
+    # path technique exclu
     assert not any("canvas" in s for s in slugs)
+    # non-bib exclu
     assert "ir_spec_preliminaire" not in slugs
     assert "IR_Spec_Preliminaire" not in slugs
 
