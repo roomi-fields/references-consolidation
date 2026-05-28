@@ -83,8 +83,16 @@ def load_ref(path: Path) -> Ref | None:
     return Ref(slug=path.stem, path=path, frontmatter=fm, body=body)
 
 
-def iter_refs(refs_dir: Path = REFS):
-    """Itère sur toutes les refs du registry."""
+def iter_refs(refs_dir: Path | None = None):
+    """Itère sur toutes les refs du registry.
+
+    Si `refs_dir` est None, lit la valeur courante de `config.REFS` au
+    runtime (permet aux tests de patcher config.REFS sans buter sur le
+    piège des defaults Python évalués à la définition).
+    """
+    if refs_dir is None:
+        from .config import REFS as _REFS
+        refs_dir = _REFS
     for p in sorted(refs_dir.glob("*.md")):
         ref = load_ref(p)
         if ref is not None:

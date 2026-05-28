@@ -353,6 +353,90 @@ def cmd_arbitrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_registry_cleanup(args: argparse.Namespace) -> int:
+    """Nettoyage historique du registre — version élargie de resolve-textbooks.
+
+    Différence avec `resolve-textbooks` (session-locale, traite uniquement les
+    refs textbook ingérées sans year/title) :
+    - Cible aussi les **duplicates avec suffixe numérique** moche
+      (`foo_2020_bar_2`, `foo_2020_bar_2_3`, etc.) qui sont des artefacts
+      de runs INGEST passés ou de désambiguation `_make_slug`.
+    - Inclut tous les `_0000_*` et `_untitled` (comme resolve-textbooks).
+
+    Délégation au sub-agent `textbook-resolver` pour les décisions IA.
+    Quand le sub-agent décide `merge_into`, le hook `sota_sync` (P2)
+    propage automatiquement la fusion vers tous les SOTAs.
+
+    Usage :
+      pipeline registry-cleanup --list                  # JSON candidates
+      pipeline registry-cleanup --apply-from <path>     # applique décisions
+    """
+    import re as _re
+    from collections import defaultdict
+    from .registry import iter_refs
+
+    # Pattern d'un suffixe numérique moche : `_2`, `_2_3`, `_2_3_4`, etc.
+    UGLY_SUFFIX_RE = _re.compile(r"_\d+(_\d+)*$")
+
+    if getattr(args, "list_candidates", False):
+        candidates = []
+        by_lastname = defaultdict(list)
+        for ref in iter_refs():
+            fm = ref.frontmatter
+            year = str(fm.get("year") or "")
+            title = fm.get("title") or ""
+            slug = ref.slug
+            # Critères élargis vs resolve-textbooks :
+            is_candidate = (
+                slug.endswith("_untitled")
+                or year in ("", "0000", "nd", "None")
+                or not title
+                or bool(UGLY_SUFFIX_RE.search(slug))
+            )
+            if is_candidate and fm.get("state") in (
+                "candidate", "page1_validated", "uid_resolved"
+            ):
+                candidates.append({
+                    "slug": slug,
+                    "author": fm.get("author") or "",
+                    "year": year,
+                    "title": title,
+                    "state": fm.get("state"),
+                    "ingest_source": fm.get("ingest_source") or "",
+                    "pdf_path": fm.get("pdf_path") or "",
+                    "ugly_suffix": bool(UGLY_SUFFIX_RE.search(slug)),
+                })
+            lname = slug.split("_")[0]
+            by_lastname[lname].append({
+                "slug": slug,
+                "year": year,
+                "title": title[:80],
+                "state": fm.get("state"),
+                "has_pdf": bool(fm.get("pdf_path")),
+            })
+        for cand in candidates:
+            lname = cand["slug"].split("_")[0]
+            cand["siblings"] = [
+                s for s in by_lastname.get(lname, [])
+                if s["slug"] != cand["slug"]
+            ]
+        print(json.dumps(candidates, ensure_ascii=False, indent=2))
+        return 0
+
+    # --apply-from : on délègue à cmd_resolve_textbooks (logique apply identique :
+    # merge_into / complete / blocked, avec hook sota_sync auto pour les merge).
+    apply_from = getattr(args, "apply_from", None)
+    if not apply_from:
+        print("[ERR] Mode inconnu. Utilise --list ou --apply-from <path.json>",
+              file=sys.stderr)
+        return 2
+    # Réutilise la logique apply de cmd_resolve_textbooks (même format JSON).
+    args_proxy = argparse.Namespace(
+        list_candidates=False, apply_from=apply_from,
+    )
+    return cmd_resolve_textbooks(args_proxy)
+
+
 def cmd_resolve_textbooks(args: argparse.Namespace) -> int:
     """Pour les refs textbooks ingérées sans year/title (slugs
     `_0000_untitled` ou `_untitled`), liste les candidates ou applique
@@ -1212,6 +1296,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     prt = sub.add_parser("resolve-textbooks",
                          help="Résout les refs textbook ingérées sans year/title")
+    prc = sub.add_parser("registry-cleanup",
+                         help="Nettoyage historique du registre (incluant "
+                              "duplicates avec suffixes numériques _2_3_4)")
+    prc.add_argument("--list", dest="list_candidates", action="store_true",
+                     help="Liste les candidates au nettoyage (JSON)")
+    prc.add_argument("--apply-from", dest="apply_from",
+                     help="JSON de décisions à appliquer "
+                          "(format identique à resolve-textbooks)")
+    prc.set_defaults(func=cmd_registry_cleanup)
+
     prt.add_argument("--list", dest="list_candidates", action="store_true",
                      help="Liste sur stdout les refs candidates en JSON")
     prt.add_argument("--apply-from", dest="apply_from",
