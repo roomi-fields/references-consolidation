@@ -706,6 +706,64 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_acquire(args: argparse.Namespace) -> int:
+    """Troisième passe : lance la cascade ciblée pour les refs d'un SOTA.
+
+    Pour chaque slug cité par le SOTA (wikilinks existants) + slugs à
+    créer (depuis IdentifyReport), pousse la ref dans la FSM jusqu'à
+    terminal (page1_validated / sota_cited_confirmed / retracted) ou
+    blocage.
+
+    Différence avec `pipeline run` : ciblé au scope d'UN SOTA.
+
+    Usage :
+      pipeline acquire <sota> [--citations-json <path>] [--apply] [--json]
+    """
+    from . import identify as id_mod
+    from . import acquire as acq_mod
+    from .ingest import ParsedCitation
+    from pathlib import Path as _Path
+
+    sota = _Path(args.sota)
+    if not sota.exists():
+        print(f"[ERR] SOTA introuvable : {sota}", file=sys.stderr)
+        return 2
+
+    # IdentifyReport optionnel (si --citations-json) sinon scan
+    # uniquement les wikilinks existants.
+    report = None
+    citations_json = getattr(args, "citations_json", None)
+    if citations_json:
+        cj = _Path(citations_json)
+        if not cj.exists():
+            print(f"[ERR] JSON citations introuvable : {cj}", file=sys.stderr)
+            return 2
+        data = json.loads(cj.read_text(encoding="utf-8"))
+        citations = [ParsedCitation(**c) for c in data]
+        report = id_mod.identify_sota(sota, citations)
+
+    target_slugs = acq_mod.slugs_cited_by_sota(sota, identify_report=report)
+    apply = bool(getattr(args, "apply", False))
+    batch = acq_mod.run_acquire_for_sota(sota, target_slugs, apply=apply)
+
+    if getattr(args, "json_output", False):
+        print(json.dumps(batch.to_dict(), ensure_ascii=False, indent=2))
+        return 1 if batch.errors else 0
+
+    print(f"\n=== Acquire : {sota.name} ===")
+    print(f"  Mode: {'APPLY' if apply else 'DRY-RUN'}")
+    print(f"  Target slugs   : {len(target_slugs)}")
+    print(f"  Succeeded      : {len(batch.succeeded)} (page1_validated)")
+    print(f"  Pending        : {len(batch.pending)} (cascade à finir)")
+    print(f"  Blocked        : {len(batch.blocked)}")
+    print(f"  Skipped (term) : {len(batch.skipped_terminal)}")
+    if batch.errors:
+        print(f"  Errors         : {len(batch.errors)}")
+        for e in batch.errors[:5]:
+            print(f"    {e}")
+    return 1 if batch.errors else 0
+
+
 def cmd_identify(args: argparse.Namespace) -> int:
     """Première passe (read-only) : produit un rapport d'identification.
 
@@ -1207,6 +1265,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Sortie JSON structurée pour scripting")
     pid.set_defaults(func=cmd_identify)
 
+    pac = sub.add_parser("acquire",
+                         help="Cascade PDF ciblée sur les refs d'un SOTA")
+    pac.add_argument("sota", help="Chemin du SOTA")
+    pac.add_argument("--citations-json",
+                     help="JSON parsé (optionnel, ajoute would_create slugs)")
+    pac.add_argument("--apply", action="store_true",
+                     help="Exécute les transitions (défaut : dry-run)")
+    pac.add_argument("--json", dest="json_output", action="store_true",
+                     help="Sortie JSON structurée")
+    pac.set_defaults(func=cmd_acquire)
+
     pli = sub.add_parser("linkify",
                          help="Insère wikilinks (PDF/ancre) + section "
                               "## Statut des sources")
@@ -1279,7 +1348,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Sous-commandes qui mutent le registre — protégées par WorkerLock pour
 # éviter 2 sessions concurrentes. Les read-only (status, lint, doctor, events)
 # ne sont PAS wrappées.
-_MUTATING_CMDS = {"run", "reactivate-ocr", "purge", "linkify"}
+_MUTATING_CMDS = {"run", "reactivate-ocr", "purge", "linkify", "acquire"}
 
 
 def main(argv: list[str] | None = None) -> int:
