@@ -1314,7 +1314,9 @@ def build_parser() -> argparse.ArgumentParser:
     pdo = sub.add_parser("doctor",
                          help="Lance les invariants I1-I19 (sur-couche worker)")
     pdo.add_argument("--fix", action="store_true",
-                     help="Applique les fix_fn auto-fixable (I4, I6, I9, I5 semi)")
+                     help="Applique les fix_fn auto-fixable (I4 path, "
+                          "I6 sha, I9 renum, I5 semi, I22 wikilink orphan, "
+                          "I23 wikilink retracted)")
     pdo.add_argument("--severity", choices=("info", "warn", "error"),
                      default="info",
                      help="Filtre min de sévérité (défaut: info = tout afficher)")

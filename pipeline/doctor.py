@@ -35,11 +35,20 @@ from .invariants import (
 class Violation:
     """Une violation d'invariant détectée par doctor."""
     invariant: str          # "I5"
-    ref_slug: str | None    # None pour registry-level (I2, I12, I13)
+    ref_slug: str | None    # None pour registry-level (I2, I12, I13).
+                            # Pour I22/I23 : `sota:<sota_stem>` (pseudo-slug,
+                            # le vrai contexte est dans `fix_data`).
     severity: str           # "ERROR" | "WARN" | "INFO"
     message: str
     auto_fixable: bool
-    fix_fn: Callable[[Ref], None] | None = None
+    # fix_fn signature varie :
+    #   - violations ref-level : reçoit (ref: Ref)
+    #   - violations sota-level (I22/I23) : reçoit (v: Violation) — accède à
+    #     v.fix_data pour les paramètres
+    fix_fn: Callable[..., None] | None = None
+    # Contexte additionnel pour les fix_fn sota-level (wikilink_slug,
+    # retracted_target, etc.).
+    fix_data: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +57,7 @@ class Violation:
             "severity": self.severity,
             "message": self.message,
             "auto_fixable": self.auto_fixable,
+            "fix_data": self.fix_data,
         }
 
 
@@ -59,6 +69,7 @@ def _dict_to_violation(d: dict) -> Violation:
         message=d["message"],
         auto_fixable=d.get("auto_fixable", False),
         fix_fn=d.get("fix_fn"),
+        fix_data=d.get("fix_data"),
     )
 
 
@@ -171,9 +182,11 @@ def run_all_checks(
                     violations.append(_dict_to_violation(d))
 
     # 2. Registry-level checks
+    # Invariants qui acceptent (refs, vault_root) — I12, I20-I23 (scan SOTAs)
+    _CHECKS_WITH_VAULT = {"I12", "I20", "I21", "I22", "I23"}
     for inv_name, check_fn in REGISTRY_LEVEL_CHECKS:
         try:
-            if inv_name == "I12" and vault_root is not None:
+            if inv_name in _CHECKS_WITH_VAULT and vault_root is not None:
                 dicts = check_fn(refs_list, vault_root)
             else:
                 dicts = check_fn(refs_list)
@@ -197,10 +210,24 @@ def auto_fix(violations: list[Violation]) -> tuple[int, int]:
     fixed = 0
     skipped = 0
     for v in violations:
-        if not v.auto_fixable or v.fix_fn is None or v.ref_slug is None:
+        if not v.auto_fixable or v.fix_fn is None:
             skipped += 1
             continue
-        # Recharger la ref depuis disque (l'objet peut être stale après un fix précédent)
+        # Cas violations sota-level (I22/I23) : ref_slug commence par `sota:`,
+        # la fix_fn reçoit la Violation entière (avec fix_data) plutôt qu'une
+        # Ref. Pas de chargement de fichier ref.
+        if v.ref_slug and v.ref_slug.startswith("sota:"):
+            try:
+                v.fix_fn(v)
+                fixed += 1
+            except Exception:
+                skipped += 1
+            continue
+        # Cas violations ref-level standard : recharger la ref depuis disque
+        # (l'objet peut être stale après un fix précédent).
+        if v.ref_slug is None:
+            skipped += 1
+            continue
         from .config import REFS
         ref_path = REFS / f"{v.ref_slug}.md"
         if not ref_path.exists():

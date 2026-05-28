@@ -109,7 +109,8 @@ def _compute_sha256(path: Path) -> str | None:
 # que doctor.py convertira en `Violation` dataclass.
 def _viol(invariant: str, ref_slug: str | None, severity: str,
           message: str, auto_fixable: bool = False,
-          fix_fn: Callable[[Ref], None] | None = None) -> dict:
+          fix_fn: "Callable | None" = None,
+          fix_data: dict | None = None) -> dict:
     return {
         "invariant": invariant,
         "ref_slug": ref_slug,
@@ -117,7 +118,44 @@ def _viol(invariant: str, ref_slug: str | None, severity: str,
         "message": message,
         "auto_fixable": auto_fixable,
         "fix_fn": fix_fn,
+        "fix_data": fix_data,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix functions sota-level (I22 / I23) — appellent sota_sync
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fix_I22(v) -> None:
+    """Retire le wikilink invalide (ref absente) de tous les SOTAs qui le
+    citent. Garde le texte humain qui suivait.
+    """
+    from .sota_sync import update_wikilinks_in_sotas
+    slug = v.fix_data.get("wikilink_slug") if v.fix_data else None
+    if not slug:
+        return
+    update_wikilinks_in_sotas(
+        old_slug=slug, new_slug=None,
+        reason=f"doctor_fix:i22_orphan_wikilink",
+        keep_human_text=True,
+    )
+
+
+def _fix_I23(v) -> None:
+    """Pour un wikilink vers retracted :
+    - si `retracted_reason=merged_into:X` → remplace par `[[X]]`
+    - sinon → retire (garde texte humain)
+    """
+    from .sota_sync import update_wikilinks_in_sotas
+    slug = v.fix_data.get("wikilink_slug") if v.fix_data else None
+    target = v.fix_data.get("retracted_target") if v.fix_data else None
+    if not slug:
+        return
+    update_wikilinks_in_sotas(
+        old_slug=slug, new_slug=target,
+        reason=f"doctor_fix:i23_retracted",
+        keep_human_text=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1053,9 +1091,11 @@ def check_I22(refs: list[Ref], vault_root: Path = VAULT) -> list[dict]:
                 violations.append(_viol(
                     "I22", f"sota:{sota_path.stem}", "ERROR",
                     f"{rel} cite [[{slug}]] mais ce slug est absent du "
-                    f"registre. Créer la ref via `/paper-trail:ingest` ou "
-                    f"corriger le wikilink.",
-                    auto_fixable=False,
+                    f"registre. Auto-fix : retire le wikilink (garde "
+                    f"le texte humain).",
+                    auto_fixable=True,
+                    fix_fn=_fix_I22,
+                    fix_data={"wikilink_slug": slug},
                 ))
     return violations
 
@@ -1077,8 +1117,8 @@ def check_I23(refs: list[Ref], vault_root: Path = VAULT) -> list[dict]:
     except Exception:
         return violations
 
-    retracted = {r.slug for r in refs if r.state == "retracted"}
-    if not retracted:
+    retracted_by_slug = {r.slug: r for r in refs if r.state == "retracted"}
+    if not retracted_by_slug:
         return violations
 
     for sota_path in adapter.find_sotas():
@@ -1087,16 +1127,33 @@ def check_I23(refs: list[Ref], vault_root: Path = VAULT) -> list[dict]:
         except Exception:
             continue
         for slug in set(citations):
-            if slug in retracted:
+            if slug in retracted_by_slug:
+                ref = retracted_by_slug[slug]
+                rr = (ref.frontmatter.get("retracted_reason") or "") or ""
+                # Détecte un merge_into pour pouvoir rediriger
+                retracted_target = None
+                if rr.startswith("merged_into:"):
+                    candidate = rr.split(":", 1)[1].strip()
+                    if candidate:
+                        retracted_target = candidate
                 try:
                     rel = sota_path.relative_to(vault_root)
                 except ValueError:
                     rel = sota_path
+                action = (
+                    f"remplace par [[{retracted_target}]]" if retracted_target
+                    else "retire le wikilink (garde texte humain)"
+                )
                 violations.append(_viol(
                     "I23", f"sota:{sota_path.stem}", "WARN",
                     f"{rel} cite [[{slug}]] mais cette ref est `retracted`. "
-                    f"Retirer le wikilink ou ré-écrire la phrase.",
-                    auto_fixable=False,
+                    f"Auto-fix : {action}.",
+                    auto_fixable=True,
+                    fix_fn=_fix_I23,
+                    fix_data={
+                        "wikilink_slug": slug,
+                        "retracted_target": retracted_target,
+                    },
                 ))
     return violations
 

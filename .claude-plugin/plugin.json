@@ -1,6 +1,6 @@
 {
   "name": "paper-trail",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Plugin Claude Code anti-hallucination pour la recherche scientifique. Cree des SOTAs (etats de l'art) garantis sans fabrication, audite les SOTAs/articles existants (purge ou warnings), avec un moteur de validation strict (FSM 8 etats + cascade d'acquisition PDF + page 1 anti-homonymie + 19 invariants de coherence). Workflow generique multi-domaines, adapter Obsidian par defaut. Anna's Archive et Sci-Hub strictement opt-in via RESEARCH_ENABLE_SHADOW_LIBS=1.",
   "author": {
     "name": "Romain Peyrichou",
