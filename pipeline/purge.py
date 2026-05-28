@@ -32,6 +32,12 @@ from .sota_sync import (
 )
 
 
+# Marqueurs de la section ## Statut des sources (auto-générée par linkify).
+# La purge SKIPPE cette zone : elle est régénérable et son contenu est
+# délibéré (traçabilité des refs retracted listées avec leur slug).
+_STATUT_BEGIN_MARKER = "<!-- paper-trail:statut:begin -->"
+_STATUT_END_MARKER = "<!-- paper-trail:statut:end -->"
+
 # Patterns
 _VALID_REF_SLUG_RE = re.compile(r"^[a-z][a-z0-9]*_(19|20)\d{2}_[a-z0-9_]+$")
 _UGLY_SUFFIX_RE = re.compile(r"_\d+_\d+(?:_\d+)+$")  # _2_3, _2_3_4, etc.
@@ -219,7 +225,26 @@ def plan_purge(
     by_slug = {r.slug: r for r in refs}
     by_lastname = _build_sibling_index(refs)
 
-    for line_no, line in enumerate(text.split("\n"), start=1):
+    # Détecte les bornes de la section Statut pour la skipper (zone
+    # auto-générée par linkify, régénérable, traçabilité voulue des
+    # refs retracted listées avec leur slug).
+    lines = text.split("\n")
+    statut_start_line = None
+    statut_end_line = None
+    for i, line in enumerate(lines, start=1):
+        if _STATUT_BEGIN_MARKER in line and statut_start_line is None:
+            statut_start_line = i
+        elif _STATUT_END_MARKER in line and statut_end_line is None:
+            statut_end_line = i
+
+    def _in_statut_zone(ln: int) -> bool:
+        if statut_start_line is None or statut_end_line is None:
+            return False
+        return statut_start_line <= ln <= statut_end_line
+
+    for line_no, line in enumerate(lines, start=1):
+        if _in_statut_zone(line_no):
+            continue
         for m in _WIKILINK_PATTERN.finditer(line):
             target = m.group(1)
             alias = m.group(2)
