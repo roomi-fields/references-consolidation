@@ -24,6 +24,13 @@ STATUT_BEGIN = "<!-- paper-trail:statut:begin -->"
 STATUT_END = "<!-- paper-trail:statut:end -->"
 STATUT_HEADING = "## Statut des sources"
 
+# Sections H2 obsolètes (anciens templates) à supprimer par linkify.
+# La section Statut auto-générée les remplace.
+OBSOLETE_SECTION_PATTERNS = [
+    re.compile(r"^## Liste finale des références.*$", re.IGNORECASE),
+    re.compile(r"^## Suite\s*$", re.IGNORECASE),
+]
+
 # Mapping (state effectif) → libellé court pour l'utilisateur.
 # Format minimaliste : une seule ligne par ref, status humain, sans
 # métadonnées techniques.
@@ -93,6 +100,42 @@ def _strip_existing_statut(text: str) -> str:
         flags=re.DOTALL,
     )
     return pattern.sub("", text).rstrip() + "\n"
+
+
+def _strip_obsolete_sections(text: str) -> str:
+    """Retire les sections H2 obsolètes (anciens templates de gestion des
+    sources) que la section Statut auto-générée remplace.
+
+    Une section H2 va du `## Heading` (inclus) jusqu'au prochain `## `
+    (exclu) ou à la fin du fichier.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Si la ligne matche un pattern obsolète, skip jusqu'au prochain
+        # heading H2 (ou fin de fichier).
+        if any(p.match(line) for p in OBSOLETE_SECTION_PATTERNS):
+            # Cherche le prochain heading H2 ou H1
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if re.match(r"^#{1,2}\s+", nxt) and not any(
+                    p.match(nxt) for p in OBSOLETE_SECTION_PATTERNS
+                ):
+                    break
+                j += 1
+            # Retire les lignes vides en queue avant le prochain heading
+            # pour ne pas laisser un trou.
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    # Nettoie les blancs multiples consécutifs résiduels
+    result = "\n".join(out)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
 
 
 def build_statut_section(entries: list[StatutEntry]) -> str:
@@ -271,6 +314,7 @@ def linkify_sota(
         try:
             text = sota_path.read_text(encoding="utf-8")
             text = _strip_existing_statut(text)
+            text = _strip_obsolete_sections(text)
             statut_md = build_statut_section(result.statut_entries)
             text = text.rstrip() + "\n\n" + statut_md + "\n"
             sota_path.write_text(text, encoding="utf-8")
